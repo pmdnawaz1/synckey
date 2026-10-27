@@ -39,6 +39,8 @@ class Bucket:
     # Rolling request count in the last 60s for emission-rate tracking.
     _window: list[float] = field(default_factory=list, init=False, repr=False)
     _consecutive_ok: int = field(default=0, init=False, repr=False)
+    _ceiling: float | None = field(default=None, init=False, repr=False)
+    _declared: tuple[float | None, float | None] = field(default=(None, None), init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._req_tokens = float(self.rpm_cap or 1_000_000)
@@ -61,7 +63,13 @@ class Bucket:
         now = time.time()
         cutoff = now - 60.0
         self._window = [t for t in self._window if t > cutoff]
-        return len(self._window) * (60.0 / max(1.0, now - (self._window[0] if self._window else now)))
+        n = len(self._window)
+        if n <= 1:
+            return float(n)
+        span = now - self._window[0]
+        if span <= 0:
+            return float(n)
+        return (n - 1) * 60.0 / span
 
     def can_send(self, estimated_tokens: int = 0) -> bool:
         self._refill()
@@ -81,16 +89,17 @@ class Bucket:
 
     def on_success(self) -> None:
         self._consecutive_ok += 1
-        # After 20 consecutive successes, relax the cap by 10%.
         if self._consecutive_ok >= 20 and self.rpm_cap is not None:
-            self.rpm_cap = min(self.rpm_cap * 1.1, self.rpm_cap * 2)
+            grown = self.rpm_cap * 1.1
+            self.rpm_cap = min(grown, self._ceiling) if self._ceiling is not None else grown
             self._consecutive_ok = 0
 
     def on_rate_limit(self, retry_after: float | None, rpm_observed: float | None = None) -> None:
         """Tighten the cap based on a 429 response."""
         self._consecutive_ok = 0
         if rpm_observed and rpm_observed > 0:
-            # Set cap to 80% of observed emission rate at time of 429.
+            if self._ceiling is None or rpm_observed > self._ceiling:
+                self._ceiling = rpm_observed
             new_cap = rpm_observed * 0.80
             self.rpm_cap = new_cap if self.rpm_cap is None else min(self.rpm_cap, new_cap)
         elif self.rpm_cap is None:
@@ -127,13 +136,20 @@ class BucketRegistry:
         if key_id not in self._buckets:
             self._buckets[key_id] = Bucket(rpm_cap=rpm_cap, tpm_cap=tpm_cap)
         b = self._buckets[key_id]
-        # If the caller now knows the caps (e.g. loaded from config), apply them.
         if rpm_cap is not None and b.rpm_cap is None:
             b.rpm_cap = rpm_cap
             b._req_tokens = rpm_cap
         if tpm_cap is not None and b.tpm_cap is None:
             b.tpm_cap = tpm_cap
             b._tok_tokens = tpm_cap
+        return b
+
+    def for_key(self, key_id: int, rpm_cap: float | None, tpm_cap: float | None) -> Bucket:
+        b = self._buckets.get(key_id)
+        if b is None or (rpm_cap, tpm_cap) != b._declared:
+            b = Bucket(rpm_cap=rpm_cap, tpm_cap=tpm_cap)
+            b._declared = (rpm_cap, tpm_cap)
+            self._buckets[key_id] = b
         return b
 
     def drop(self, key_id: int) -> None:

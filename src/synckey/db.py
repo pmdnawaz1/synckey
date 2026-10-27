@@ -194,6 +194,10 @@ class Database:
         )
         self.conn.commit()
 
+    def set_key_weight(self, key_id: int, weight: int) -> None:
+        self.conn.execute("UPDATE keys SET weight=? WHERE id=?", (weight, key_id))
+        self.conn.commit()
+
     def list_keys(self, provider: str | None = None, enabled_only: bool = False) -> list[KeyRecord]:
         sql = "SELECT * FROM keys"
         clauses, params = [], []

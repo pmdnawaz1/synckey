@@ -143,3 +143,63 @@ def test_purge_removes_completed_after_ttl(ctx):
     removed = ctx.db.purge_deferred(ttl=3600, max_queue_age=86400)
     assert removed == 1
     assert ctx.db.get_deferred("defer_old") is None
+
+
+@respx.mock
+def test_worker_stores_upstream_error_as_error(ctx):
+    ids = _add(ctx, n=1)
+    _cool_all(ctx, ids)
+    with TestClient(create_app(ctx)) as client:
+        rid = client.post(
+            "/v1/chat/completions", headers=AUTH, json={"model": MODEL, "messages": []}
+        ).json()["id"]
+
+        ctx.states.set_live(ids[0])
+        ctx.pool._buckets.drop(ids[0])
+        respx.post(GROQ_CHAT).mock(
+            return_value=httpx.Response(500, json={"error": "boom"})
+        )
+        row = ctx.db.get_deferred(rid)
+
+        class _W:
+            def record(self, **k):
+                pass
+
+        async def _drive():
+            async with httpx.AsyncClient() as hc:
+                await _run_deferred_job(ctx, hc, _W(), row)
+
+        asyncio.run(_drive())
+
+        done = ctx.db.get_deferred(rid)
+        assert done["status"] == "error"
+        assert done["status_code"] == 500
+
+        r = client.get(f"/v1/requests/{rid}", headers=AUTH)
+    assert r.status_code == 500
+
+
+def test_worker_exception_requeues_job(ctx, monkeypatch):
+    ids = _add(ctx, n=1)
+    _cool_all(ctx, ids)
+    with TestClient(create_app(ctx)) as client:
+        rid = client.post(
+            "/v1/chat/completions", headers=AUTH, json={"model": MODEL, "messages": []}
+        ).json()["id"]
+
+    async def _boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("synckey.server.run_request", _boom)
+    row = ctx.db.get_deferred(rid)
+
+    class _W:
+        def record(self, **k):
+            pass
+
+    async def _drive():
+        async with httpx.AsyncClient() as hc:
+            await _run_deferred_job(ctx, hc, _W(), row)
+
+    asyncio.run(_drive())
+    assert ctx.db.get_deferred(rid)["status"] == "queued"

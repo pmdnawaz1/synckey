@@ -279,7 +279,7 @@ class Router:
         """
         out: list[tuple[str, str]] = []
         for t in sorted(self._tier_index, reverse=True):
-            if t < floor or t != tier:
+            if t < floor or t > tier:
                 continue
             for m in self._tier_index.get(t, []):
                 if m == exclude_model:

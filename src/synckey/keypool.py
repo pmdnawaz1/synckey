@@ -92,7 +92,7 @@ class KeyPool:
             if st.health == Health.DEAD:
                 continue
 
-            bucket = self._buckets.get(r.id, rpm_cap=r.rpm_limit, tpm_cap=r.tpm_limit)
+            bucket = self._buckets.for_key(r.id, r.rpm_limit, r.tpm_limit)
             remaining = max(0.0, st.cooldown_until - now) if st.health == Health.COOLING else 0.0
             is_cooling = remaining > 0
             can_send = bucket.can_send(estimated_tokens)
@@ -133,7 +133,10 @@ class KeyPool:
         st = self.states.get(key_id)
         fails = (1 if st.health == Health.LIVE else 2)
         delay = min(self.default_cooldown, 2.0 * fails)
-        self.states.set_cooling(key_id, time.time() + delay)
+        until = time.time() + delay
+        if st.health == Health.COOLING and st.cooldown_until > until:
+            until = st.cooldown_until
+        self.states.set_cooling(key_id, until)
 
     def consume(self, key_id: int, estimated_tokens: int = 0) -> None:
         self._buckets.get(key_id).consume(estimated_tokens)

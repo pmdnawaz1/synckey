@@ -42,6 +42,13 @@ def test_user_override():
     assert model_tier("my-custom-model") == FRONTIER
 
 
+def test_load_overrides_clears_stale():
+    load_overrides({"stale-model": "frontier"}, {})
+    assert model_tier("stale-model") == FRONTIER
+    load_overrides({}, {})
+    assert model_tier("stale-model") is None
+
+
 def test_pricing():
     price = model_price("claude-opus-4-8")
     assert price is not None

@@ -71,7 +71,7 @@ class Settings:
         path = config_path()
         if not path.exists():
             return cls()
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
         gw = data.get("gateway", {})
         routing = data.get("routing", {})
         tiers = data.get("tiers", {})
@@ -100,13 +100,11 @@ class Settings:
 
     def save(self) -> None:
         """Write current settings back to config.toml."""
-        import tomllib
-
         path = config_path()
         data = {}
         if path.exists():
             try:
-                data = tomllib.loads(path.read_text())
+                data = tomllib.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 pass
         data.setdefault("gateway", {})["host"] = self.host
@@ -129,11 +127,59 @@ class Settings:
         data.setdefault("deferred", {})["max_queue"] = self.deferred_max_queue
         data.setdefault("deferred", {})["max_queue_age"] = self.deferred_max_queue_age
 
-        try:
-            import tomli
-        except ImportError:
-            import toml as tomli
-        path.write_text(tomli.dumps(data))
+        path.write_text(dumps_toml(data), encoding="utf-8")
+
+
+def _toml_key(key: str) -> str:
+    if key and all(c.isalnum() or c in "_-" for c in key):
+        return key
+    return _toml_str(key)
+
+
+def _toml_str(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
+
+
+def _toml_value(value) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return _toml_str(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    if isinstance(value, dict):
+        inner = ", ".join(f"{_toml_key(k)} = {_toml_value(v)}" for k, v in value.items())
+        return "{ " + inner + " }" if inner else "{}"
+    raise TypeError(f"Cannot encode {type(value).__name__} as TOML")
+
+
+def dumps_toml(data: dict) -> str:
+    lines: list[str] = []
+    for key, value in data.items():
+        if isinstance(value, dict):
+            lines.append(f"[{key}]")
+            for sk, sv in value.items():
+                lines.append(f"{_toml_key(sk)} = {_toml_value(sv)}")
+            lines.append("")
+        elif isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            for item in value:
+                lines.append(f"[[{key}]]")
+                for sk, sv in item.items():
+                    lines.append(f"{_toml_key(sk)} = {_toml_value(sv)}")
+                lines.append("")
+        else:
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def ensure_home() -> Path:

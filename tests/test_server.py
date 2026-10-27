@@ -192,3 +192,82 @@ def test_healthz_includes_key_counts(ctx):
         r = client.get("/healthz")
     body = r.json()
     assert "keys" in body
+
+
+def test_healthz_counts_fresh_keys_as_live(ctx):
+    a, b = _add(ctx, n=2)
+    with TestClient(create_app(ctx)) as client:
+        assert client.get("/healthz").json()["keys"] == {"live": 2, "cooling": 0, "dead": 0}
+    ctx.pool.on_rate_limit(a, retry_after=60)
+    ctx.pool.on_dead(b, "test")
+    with TestClient(create_app(ctx)) as client:
+        assert client.get("/healthz").json()["keys"] == {"live": 0, "cooling": 1, "dead": 1}
+
+
+def test_non_object_body_returns_400(ctx):
+    with TestClient(create_app(ctx)) as client:
+        r = client.post("/v1/chat/completions", headers=AUTH, json=[])
+    assert r.status_code == 400
+    assert r.json()["error"]["type"] == "invalid_request_error"
+
+
+@respx.mock
+def test_stream_4xx_returns_upstream_without_retry(ctx):
+    _add(ctx, n=2)
+    route = respx.post(GROQ_CHAT).mock(
+        return_value=httpx.Response(400, json={"error": {"message": "bad request"}})
+    )
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={"model": "groq/llama-3.3-70b-versatile", "messages": [], "stream": True},
+        )
+    assert r.status_code == 400
+    assert route.call_count == 1
+    assert r.json()["error"]["message"] == "bad request"
+
+
+def test_cross_provider_fallback_off_stays_on_first_provider(ctx):
+    from synckey.server import plan_attempts
+
+    ctx.db.add_key("groq", "g", ctx.box.seal("s"))
+    ctx.db.add_key("cerebras", "c", ctx.box.seal("s"))
+    ctx.router._index = {"llama-3.3-70b": {"groq", "cerebras"}}
+    ctx.router._rebuild_tier_index()
+    res = ctx.router.resolve("llama-3.3-70b")
+    ctx.settings.cross_provider_fallback = False
+    attempts = plan_attempts(ctx, res, 6)
+    assert attempts and {a.provider_id for a in attempts} == {res.providers[0]}
+    ctx.settings.cross_provider_fallback = True
+    attempts = plan_attempts(ctx, res, 6)
+    assert {a.provider_id for a in attempts} == {"groq", "cerebras"}
+
+
+@respx.mock
+def test_tpm_limit_enforced(ctx):
+    ctx.db.add_key("groq", "k", ctx.box.seal("s"), tpm_limit=5)
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={"model": "groq/llama-3.3-70b-versatile", "messages": []},
+        )
+    assert r.status_code == 202
+    assert ctx.db.count_deferred("queued") == 1
+
+
+@respx.mock
+def test_tpm_tokens_consumed_on_success(ctx):
+    kid = ctx.db.add_key("groq", "k", ctx.box.seal("s"), tpm_limit=100000)
+    respx.post(GROQ_CHAT).mock(
+        return_value=httpx.Response(200, json={"choices": [], "usage": {}})
+    )
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={"model": "groq/llama-3.3-70b-versatile", "messages": []},
+        )
+    assert r.status_code == 200
+    assert ctx.pool._buckets.get(kid)._tok_tokens < 100000

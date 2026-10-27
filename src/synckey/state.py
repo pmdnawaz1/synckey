@@ -148,5 +148,17 @@ class StateStore:
     def all(self) -> dict[int, KeyState]:
         return dict(self._mem)
 
+    def counts(self, key_ids) -> tuple[int, int, int]:
+        live = cooling = dead = 0
+        for kid in key_ids:
+            st = self._mem.get(kid, KeyState())
+            if st.health == Health.DEAD:
+                dead += 1
+            elif st.health == Health.COOLING and st.cooldown_remaining() > 0:
+                cooling += 1
+            else:
+                live += 1
+        return live, cooling, dead
+
     def close(self) -> None:
         self._conn.close()

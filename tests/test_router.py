@@ -69,3 +69,16 @@ def test_tier_alternatives_respects_floor(ctx):
     alts = ctx.router.tier_alternatives(HIGH, HIGH, "claude-sonnet-4-6")
     models = [m for m, _ in alts]
     assert "gpt-4o-mini" not in models
+
+
+def test_tier_alternatives_span_floor_to_tier(ctx):
+    ctx.router._index = {
+        "claude-opus-4-8": {"a"},
+        "claude-sonnet-4-6": {"b"},
+        "gpt-4o-mini": {"c"},
+    }
+    ctx.router._rebuild_tier_index()
+    alts = ctx.router.tier_alternatives(FRONTIER, HIGH, "claude-opus-4-8")
+    models = [m for m, _ in alts]
+    assert "claude-sonnet-4-6" in models
+    assert "gpt-4o-mini" not in models

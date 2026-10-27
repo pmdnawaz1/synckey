@@ -445,6 +445,10 @@ def keys(
     rm: int = typer.Option(None, "--rm", help="Remove a key by its id."),
     enable: int = typer.Option(None, "--enable", help="Re-enable a dead or disabled key."),
     disable: int = typer.Option(None, "--disable", help="Disable a key without deleting it."),
+    limits: int = typer.Option(None, "--limits", help="Set caps on a key by its id."),
+    rpm: float = typer.Option(None, "--rpm", help="Requests-per-minute cap (use with --limits; 0 clears)."),
+    tpm: float = typer.Option(None, "--tpm", help="Tokens-per-minute cap (use with --limits; 0 clears)."),
+    weight: int = typer.Option(None, "--weight", help="Routing weight (use with --limits)."),
 ):
     """List all stored keys, or manage them with flags.
 
@@ -453,6 +457,7 @@ def keys(
       synckey keys --rm 3       remove key #3
       synckey keys --enable 3   re-enable key #3
       synckey keys --disable 3  disable key #3
+      synckey keys --limits 3 --rpm 60 --tpm 100000 --weight 2
     """
     ctx = load_ctx()
 
@@ -477,6 +482,30 @@ def keys(
         ctx.close()
         return
 
+    if limits is not None or rpm is not None or tpm is not None or weight is not None:
+        if limits is None:
+            err_con.print("[red]--rpm/--tpm/--weight need --limits <id>.[/]")
+            raise typer.Exit(1)
+        recs = [k for k in ctx.db.list_keys() if k.id == limits]
+        if not recs:
+            err_con.print(f"[red]No key #{limits}.[/]")
+            ctx.close()
+            return
+        rec = recs[0]
+        ctx.db.set_key_limits(
+            limits,
+            rec.rpm_limit if rpm is None else (None if rpm <= 0 else rpm),
+            rec.tpm_limit if tpm is None else (None if tpm <= 0 else tpm),
+        )
+        if weight is not None:
+            if weight < 1:
+                err_con.print("[red]Weight must be >= 1.[/]")
+                raise typer.Exit(1)
+            ctx.db.set_key_weight(limits, weight)
+        console.print(f"[green]Updated[/] key #{limits}.")
+        ctx.close()
+        return
+
     keys = ctx.db.list_keys(provider=provider.lower() if provider else None)
     if not keys:
         console.print("[yellow]No keys stored.[/] Run `synckey setup` to add one.")
@@ -490,6 +519,7 @@ def keys(
     table.add_column("id", style="cyan", no_wrap=True)
     table.add_column("provider")
     table.add_column("health")
+    table.add_column("limits")
     table.add_column("requests", justify="right")
     table.add_column("errors", justify="right")
     table.add_column("cost", justify="right")
@@ -500,10 +530,18 @@ def keys(
         ks = st if st else KeyState()
         ht = health_text(ks.health, ks.cooldown_remaining())
         s = stats.get(k.id, {})
+        lim = []
+        if k.rpm_limit:
+            lim.append(f"{k.rpm_limit:g}rpm")
+        if k.tpm_limit:
+            lim.append(f"{fmt_num(int(k.tpm_limit))}tpm")
+        if k.weight != 1:
+            lim.append(f"w{k.weight}")
         table.add_row(
             str(k.id),
             k.provider,
             ht,
+            " ".join(lim),
             str(s.get("requests", 0)),
             str(s.get("errors", 0)),
             fmt_cost(s.get("cost")),
@@ -596,12 +634,12 @@ def setup(force: bool = typer.Option(False, "--force", help="Regenerate the unif
         curl_examples = (
             f"\n"
             f"[bold]Try it:[/]\n"
-            f"  curl http://localhost:8080/v1/chat/completions \\\n"
+            f"  curl http://localhost:{ctx.settings.port}/v1/chat/completions \\\n"
             f"    -H 'Authorization: Bearer YOUR_SYNCKEY_KEY' \\\n"
             f"    -H 'Content-Type: application/json' \\\n"
             f"    -d '{{\"model\": \"{default_model}\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hi\"}}]}}'\n\n"
             f"[bold]With a specific provider:[/]\n"
-            f"  curl http://localhost:8080/v1/chat/completions \\\n"
+            f"  curl http://localhost:{ctx.settings.port}/v1/chat/completions \\\n"
             f"    -H 'Authorization: Bearer YOUR_SYNCKEY_KEY' \\\n"
             f"    -H 'Content-Type: application/json' \\\n"
             f"    -d '{{\"model\": \"{first_provider}/{default_model}\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hi\"}}]}}'\n"
@@ -685,12 +723,12 @@ def _run_guide():
 
 @routing_app.command("priority")
 def routing_priority(
-    providers: str = typer.Argument(None, help="Space-separated provider list, e.g. groq gemini."),
+    providers: list[str] = typer.Argument(None, help="Provider list in preference order, e.g. groq gemini."),
 ):
     """Show or set provider priority order (first = preferred when multiple have the model)."""
     ctx = load_ctx()
     if providers:
-        plist = [p.strip().lower() for p in providers.split() if p.strip()]
+        plist = [p.strip().lower() for chunk in providers for p in chunk.split() if p.strip()]
         for p in plist:
             if p not in ctx.providers:
                 err_con.print(f"[red]Unknown provider:[/] {p}")
@@ -782,10 +820,7 @@ def serve(
     bind_host = host or ctx.settings.host
     bind_port = port or ctx.settings.port
 
-    states = ctx.states.all()
-    from .state import Health as H
-    live = sum(1 for s in states.values() if s.health == H.LIVE)
-    dead = sum(1 for s in states.values() if s.health == H.DEAD)
+    live, _, dead = ctx.states.counts(k.id for k in ctx.db.list_keys())
 
     console.print(
         Panel.fit(
@@ -805,21 +840,26 @@ def serve(
     )
     ctx.close()
 
-    srv = os.path.join(os.path.dirname(__file__), "_serve_temp.py")
-    with open(srv, "w") as f:
-        f.write("import uvicorn\n")
-        f.write("from synckey.server import create_app\n")
-        f.write("from synckey.context import Context\n")
-        f.write(f"uvicorn.run(create_app(Context()), host='{bind_host}', port={bind_port}, log_level='warning', access_log=False)\n")
+    code = (
+        "from synckey.server import create_app;"
+        "from synckey.context import Context;"
+        "import uvicorn;"
+        f"uvicorn.run(create_app(Context()), host={bind_host!r}, port={bind_port}, "
+        "log_level='warning', access_log=False)"
+    )
 
-    kwargs = {"cwd": os.getcwd()}
+    kwargs = {
+        "cwd": os.getcwd(),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-        kwargs["stdin"] = subprocess.DEVNULL
-        kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
+    else:
+        kwargs["start_new_session"] = True
 
-    subprocess.Popen([sys.executable, srv], **kwargs)
+    subprocess.Popen([sys.executable, "-c", code], **kwargs)
     console.print("\n[green]Gateway running in background.[/] Use [bold]synckey status[/] to monitor.")
 
 
@@ -939,34 +979,6 @@ def spend(hours: float = typer.Option(None, "--hours")):
         )
     console.print(table)
     ctx.close()
-    ctx = load_ctx()
-    since = time.time() - hours * 3600 if hours else None
-    totals = ctx.db.usage_totals(since)
-    summary = ctx.db.usage_summary(since)
-
-    total_cost = totals["cost_usd"] or 0.0
-    console.print(f"[bold]Total spend:[/] [green]{fmt_cost(total_cost)}[/]"
-                  + (f" (last {hours}h)" if hours else " (all time)"))
-
-    if not summary:
-        console.print("[dim]No usage data.[/]")
-        ctx.close()
-        return
-
-    table = Table(title="Spend breakdown")
-    for col in ("provider", "model", "tier", "requests", "tokens", "cost", "% total"):
-        table.add_column(col)
-    for r in summary:
-        cost = r["cost_usd"] or 0.0
-        pct = (cost / total_cost * 100) if total_cost else 0
-        tier_name = TIER_NAMES.get(r["tier"] or 0, "")
-        table.add_row(
-            r["provider"], r["model"], tier_name,
-            str(r["requests"]), fmt_num(r["total_tokens"]),
-            fmt_cost(cost), f"{pct:.1f}%",
-        )
-    console.print(table)
-    ctx.close()
 
 
 @app.command()
@@ -1024,7 +1036,7 @@ def deferred_list(limit: int = typer.Option(25, "--limit", "-n")):
         eta = r["eta"] or 0
         eta_str = f"{int(eta - now)}s" if status_ in ("queued", "running") and eta > now else ""
         t.add_row(
-            r["id"][:18],
+            r["id"],
             f"[{colors.get(status_, '')}]{status_}[/]" if colors.get(status_) else status_,
             r["model"] or "",
             f"{int(now - r['created_at'])}s",
@@ -1072,11 +1084,7 @@ def status():
     configured = ctx.db.providers_with_keys()
     totals = ctx.db.usage_totals()
 
-    all_states = ctx.states.all()
-    from .state import Health as H
-    n_live = sum(1 for s in all_states.values() if s.health == H.LIVE)
-    n_cool = sum(1 for s in all_states.values() if s.health == H.COOLING)
-    n_dead = sum(1 for s in all_states.values() if s.health == H.DEAD)
+    n_live, n_cool, n_dead = ctx.states.counts(k.id for k in keys)
 
     console.print(
         Panel.fit(
@@ -1186,12 +1194,12 @@ async def _call_model(ctx, provider, model, k, secret):
     try:
         url = prov.base_url.rstrip("/") + "/chat/completions"
         t0 = time.time()
-        resp = httpx.AsyncClient(timeout=30.0).post(
-            url,
-            headers={**prov.auth_headers(secret), "Content-Type": "application/json"},
-            json=body,
-        )
-        resp = await resp
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                url,
+                headers={**prov.auth_headers(secret), "Content-Type": "application/json"},
+                json=body,
+            )
         latency = int((time.time() - t0) * 1000)
         if resp.status_code == 200:
             data = resp.json()
@@ -1236,17 +1244,17 @@ def _run_test_calls(ctx, provider, model, calls):
     import asyncio
     results = []
     for i in range(calls):
-        for k in keys:
-            try:
-                secret = ctx.box.open(k.secret)
-            except RuntimeError:
-                err_con.print(f"[red]Key #{k.id} is corrupt (secret.key may have changed).[/]")
-                err_con.print(f"[dim]Re-add it: synckey setup[/]")
-                continue
-            status, latency, tokens, error, chain = asyncio.run(
-                _call_model(ctx, provider.lower(), model, k, secret)
-            )
-            results.append((i + 1, k, provider, model, status, latency, tokens, error, chain))
+        k = keys[i % len(keys)]
+        try:
+            secret = ctx.box.open(k.secret)
+        except RuntimeError:
+            err_con.print(f"[red]Key #{k.id} is corrupt (secret.key may have changed).[/]")
+            err_con.print(f"[dim]Re-add it: synckey setup[/]")
+            continue
+        status, latency, tokens, error, chain = asyncio.run(
+            _call_model(ctx, provider.lower(), model, k, secret)
+        )
+        results.append((i + 1, k, provider, model, status, latency, tokens, error, chain))
 
     for i, k, prov, mod, status, latency, tokens, error, chain in results:
         status_str = f"[green]{status}[/]" if status == 200 else f"[red]{status}[/]"
@@ -1287,17 +1295,14 @@ def dash(interval: float = typer.Option(2.0, "--interval", "-i", help="Refresh i
 
     Keys: [1] overview  [2] keys  [3] events  [4] routing  [p] pause  [r] refresh  [q] quit.
     """
-    from .state import Health as H, KeyState
+    from .state import KeyState
 
     ctx = load_ctx()
     interactive = sys.stdin.isatty()
 
     def _header(view: str, paused: bool) -> Panel:
         totals = ctx.db.usage_totals()
-        all_st = ctx.states.all()
-        n_live = sum(1 for s in all_st.values() if s.health == H.LIVE)
-        n_cool = sum(1 for s in all_st.values() if s.health == H.COOLING)
-        n_dead = sum(1 for s in all_st.values() if s.health == H.DEAD)
+        n_live, n_cool, n_dead = ctx.states.counts(k.id for k in ctx.db.list_keys())
         default = ctx.prefs.global_default() or "(none)"
         state = "[yellow]PAUSED[/]" if paused else "[green]live[/]"
         return Panel(

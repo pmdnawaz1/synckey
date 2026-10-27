@@ -88,3 +88,11 @@ def test_proactive_throttle_skips_exhausted_bucket(ctx):
     throttled = [c for c in cands if not c.ready and not c.cooling]
     assert any(c.key_id == b for c in ready)
     assert any(c.key_id == a for c in throttled)
+
+
+def test_on_failure_preserves_longer_cooldown(ctx):
+    a = _add(ctx, "groq", "a", "key-a")
+    ctx.pool.on_rate_limit(a, retry_after=120)
+    before = ctx.states.get(a).cooldown_until
+    ctx.pool.on_failure(a)
+    assert ctx.states.get(a).cooldown_until == before

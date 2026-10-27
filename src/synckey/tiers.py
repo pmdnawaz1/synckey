@@ -118,6 +118,8 @@ _price_overrides: dict[str, tuple[float, float]] = {}
 
 def load_overrides(tiers: dict[str, str], prices: dict[str, list]) -> None:
     """Load user-defined tier and price overrides from config."""
+    _tier_overrides.clear()
+    _price_overrides.clear()
     for model, tier_name in tiers.items():
         t = TIER_BY_NAME.get(tier_name.lower())
         if t is not None:

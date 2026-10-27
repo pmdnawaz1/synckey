@@ -35,7 +35,7 @@ from .deferred import estimate_eta, new_request_id
 from .keypool import parse_retry_after, Candidate
 from .providers import Provider
 from .router import Resolution
-from .tiers import TIER_BY_NAME, cost_usd
+from .tiers import TIER_BY_NAME, cost_usd, model_tier
 from .usage import UsageWriter
 
 
@@ -48,13 +48,25 @@ class Attempt:
     candidate: Candidate
 
 
-def plan_attempts(ctx: Context, resolution: Resolution, max_retries: int) -> list[Attempt]:
+def estimate_tokens(body: dict) -> int:
+    try:
+        return max(1, len(orjson.dumps(body)) // 4)
+    except Exception:
+        return 0
+
+
+def plan_attempts(
+    ctx: Context, resolution: Resolution, max_retries: int, estimated_tokens: int = 0
+) -> list[Attempt]:
+    providers = resolution.providers
+    if not ctx.settings.cross_provider_fallback:
+        providers = providers[:1]
     attempts: list[Attempt] = []
-    for pid in resolution.providers:
+    for pid in providers:
         prov = ctx.providers.get(pid)
         if not prov:
             continue
-        for cand in ctx.pool.candidates(pid):
+        for cand in ctx.pool.candidates(pid, estimated_tokens):
             attempts.append(Attempt(pid, prov, cand.key_id, cand.secret, cand))
     # ready (bucket has space) before throttled before cooling
     attempts.sort(key=lambda a: (a.candidate.cooling, not a.candidate.ready))
@@ -69,17 +81,20 @@ def all_deep_cooling(attempts: list[Attempt], threshold: float) -> bool:
     )
 
 
-def build_tier_alt_attempts(ctx: Context, resolution: Resolution, body: dict) -> list[Attempt]:
-    """Find ready candidates on same-tier alternative models."""
+def build_tier_alt_attempts(
+    ctx: Context, resolution: Resolution, body: dict, estimated_tokens: int = 0
+) -> list[Attempt]:
+    """Find ready candidates on alternative models between floor and tier."""
     if not (resolution.tier and resolution.floor):
         return []
     alts = ctx.router.tier_alternatives(resolution.tier, resolution.floor, resolution.bare_model)
+    if not ctx.settings.cross_provider_fallback:
+        alts = [(m, p) for m, p in alts if p in resolution.providers[:1]]
     for alt_model, alt_pid in alts:
         prov = ctx.providers.get(alt_pid)
         if not prov:
             continue
-        # Only take candidates that are not themselves cooling.
-        cands = [c for c in ctx.pool.candidates(alt_pid) if not c.cooling]
+        cands = [c for c in ctx.pool.candidates(alt_pid, estimated_tokens) if not c.cooling]
         if not cands:
             continue
         ctx.db.record_event(
@@ -88,7 +103,7 @@ def build_tier_alt_attempts(ctx: Context, resolution: Resolution, body: dict) ->
             model=resolution.bare_model,
             fallback_to=alt_model,
             tier_from=resolution.tier,
-            tier_to=resolution.tier,
+            tier_to=model_tier(alt_model) or resolution.tier,
             message=f"Primary blocked; routing to {alt_model} on {alt_pid}",
         )
         body["model"] = alt_model
@@ -176,11 +191,7 @@ def create_app(ctx: Context | None = None) -> FastAPI:
 
     @app.get("/healthz")
     async def healthz():
-        states = ctx.states.all()
-        from .state import Health
-        dead = sum(1 for s in states.values() if s.health == Health.DEAD)
-        cooling = sum(1 for s in states.values() if s.health == Health.COOLING and s.cooldown_remaining() > 0)
-        live = len(states) - dead - cooling
+        live, cooling, dead = ctx.states.counts(k.id for k in ctx.db.list_keys())
         return {
             "status": "ok",
             "providers": ctx.db.providers_with_keys(),
@@ -307,6 +318,8 @@ async def forward(
         body = await request.json()
     except Exception:
         return err("Body must be valid JSON.", "invalid_request_error", 400)
+    if not isinstance(body, dict):
+        return err("Body must be a JSON object.", "invalid_request_error", 400)
 
     # synckey-specific routing hints; strip from the body before forwarding upstream.
     provider_hint = body.pop("provider", None) or request.headers.get("x-provider")
@@ -369,19 +382,19 @@ async def run_request(
     resolve.
     """
     body["model"] = resolution.bare_model
+    estimated = estimate_tokens(body)
     stream = bool(body.get("stream")) and allow_stream
     if stream:
         opts = body.get("stream_options") or {}
         opts["include_usage"] = True
         body["stream_options"] = opts
 
-    attempts = plan_attempts(ctx, resolution, ctx.settings.max_retries)
+    attempts = plan_attempts(ctx, resolution, ctx.settings.max_retries, estimated)
 
-    # Jump to same-tier alternatives when primary is gone or all keys deep-cooling.
     if ctx.settings.tier_fallback_enabled:
         threshold = ctx.settings.deep_cooling_threshold
         if not attempts or all_deep_cooling(attempts, threshold):
-            alt_attempts = build_tier_alt_attempts(ctx, resolution, body)
+            alt_attempts = build_tier_alt_attempts(ctx, resolution, body, estimated)
             if alt_attempts:
                 attempts = alt_attempts
             # If no tier alts found, fall through to the cooling primaries (beats 503).
@@ -406,7 +419,7 @@ async def run_request(
             **attempt.provider.auth_headers(attempt.secret),
         }
         params = attempt.provider.auth_params(attempt.secret)
-        ctx.pool.consume(attempt.key_id)
+        ctx.pool.consume(attempt.key_id, estimated)
         started = time.perf_counter()
 
         if stream:
@@ -539,10 +552,16 @@ async def _run_deferred_job(ctx: Context, client, writer, row) -> None:
         return
 
     ctx.db.set_deferred_running(rid)
-    resp = await run_request(ctx, client, writer, row["path"], body, resolution, allow_stream=False)
-    if resp is None:
-        # Still no capacity; put it back with a fresh ETA for the next cycle.
+    try:
+        resp = await run_request(ctx, client, writer, row["path"], body, resolution, allow_stream=False)
+    except Exception:
         ctx.db.requeue_deferred(rid, time.time() + estimate_eta(ctx, resolution.providers))
+        return
+    if resp is None:
+        ctx.db.requeue_deferred(rid, time.time() + estimate_eta(ctx, resolution.providers))
+        return
+    if resp.status_code >= 400:
+        ctx.db.fail_deferred(rid, resp.status_code, bytes(resp.body).decode("utf-8", "replace"))
         return
     ctx.db.complete_deferred(rid, resp.status_code, bytes(resp.body))
 
@@ -619,7 +638,7 @@ async def try_stream(
     attempt: Attempt,
     resolution: Resolution,
     started: float,
-) -> StreamingResponse | None:
+) -> Response | None:
     req = client.build_request("POST", url, json=body, headers=headers, params=params)
     try:
         resp = await client.send(req, stream=True)
@@ -630,8 +649,12 @@ async def try_stream(
     if resp.status_code != 200:
         latency = int((time.perf_counter() - started) * 1000)
         await resp.aread()
-        classify_failure(ctx, writer, attempt, resp, resolution, body["model"], latency)
+        retriable, _, _ = classify_failure(ctx, writer, attempt, resp, resolution, body["model"], latency)
+        status_code = resp.status_code
+        content = bytes(resp.content)
         await resp.aclose()
+        if not retriable:
+            return Response(content=content, media_type="application/json", status_code=status_code)
         return None
 
     ctx.pool.on_success(attempt.key_id)

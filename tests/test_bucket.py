@@ -71,3 +71,34 @@ def test_registry_applies_known_cap():
 
 
 import pytest
+
+
+def test_emission_single_sample_is_not_inflated():
+    b = Bucket()
+    b.consume()
+    assert b.emission_rpm() == 1.0
+
+
+def test_emission_rate_over_span():
+    b = Bucket()
+    now = time.time()
+    b._window = [now - 30, now - 10]
+    assert b.emission_rpm() == pytest.approx(60.0 / 30.0)
+
+
+def test_relaxation_capped_at_observed_max():
+    b = Bucket(rpm_cap=60)
+    b.on_rate_limit(retry_after=20, rpm_observed=40)
+    for _ in range(200):
+        b.on_success()
+    assert b.rpm_cap == pytest.approx(40.0)
+
+
+def test_for_key_adopts_changed_declared_caps():
+    r = BucketRegistry()
+    b1 = r.for_key(1, 60, None)
+    assert b1.rpm_cap == 60
+    assert r.for_key(1, 60, None) is b1
+    b3 = r.for_key(1, 30, None)
+    assert b3 is not b1 and b3.rpm_cap == 30
+    assert r.for_key(1, None, None).rpm_cap is None
