@@ -8,6 +8,10 @@
   One API key. Every AI model. Zero headaches.
 </h1>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pmdnawaz1/synckey/main/assets/demo.gif" alt="synckey demo: status, keys cooling, tier-fallback events, live dashboard" width="720"/>
+</p>
+
 **synckey** lets your app use Gemini, Groq, OpenAI, Anthropic, Cerebras, Mistral, DeepSeek, xAI, and more — through a single OpenAI-compatible API key. No code changes. No rate limit nightmares. Just one endpoint.
 
 ```python
