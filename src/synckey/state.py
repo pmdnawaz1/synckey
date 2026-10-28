@@ -33,7 +33,6 @@ class KeyState:
     cooldown_until: float = 0.0
     dead_reason: str = ""
     rpm_observed: float | None = None
-    tpm_observed: float | None = None
 
     def is_available(self) -> bool:
         if self.health == Health.DEAD:
@@ -55,20 +54,18 @@ CREATE TABLE IF NOT EXISTS key_state (
     cooldown_until  REAL    NOT NULL DEFAULT 0,
     dead_reason     TEXT    NOT NULL DEFAULT '',
     rpm_observed    REAL,
-    tpm_observed    REAL,
     updated_at      REAL    NOT NULL DEFAULT 0
 );
 """
 
 _UPSERT = """
-INSERT INTO key_state(key_id, health, cooldown_until, dead_reason, rpm_observed, tpm_observed, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO key_state(key_id, health, cooldown_until, dead_reason, rpm_observed, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(key_id) DO UPDATE SET
     health         = excluded.health,
     cooldown_until = excluded.cooldown_until,
     dead_reason    = excluded.dead_reason,
     rpm_observed   = excluded.rpm_observed,
-    tpm_observed   = excluded.tpm_observed,
     updated_at     = excluded.updated_at
 """
 
@@ -87,8 +84,11 @@ class StateStore:
 
     def _load(self) -> None:
         now = time.time()
-        for row in self._conn.execute("SELECT * FROM key_state").fetchall():
-            key_id, health, cooldown_until, dead_reason, rpm_obs, tpm_obs, _ = row
+        # Explicit columns: older databases may still carry a tpm_observed column.
+        for row in self._conn.execute(
+            "SELECT key_id, health, cooldown_until, dead_reason, rpm_observed FROM key_state"
+        ).fetchall():
+            key_id, health, cooldown_until, dead_reason, rpm_obs = row
             h = Health(health)
             # Expired cooldowns auto-recover to LIVE on load.
             if h == Health.COOLING and cooldown_until <= now:
@@ -99,7 +99,6 @@ class StateStore:
                 cooldown_until=cooldown_until,
                 dead_reason=dead_reason or "",
                 rpm_observed=rpm_obs,
-                tpm_observed=tpm_obs,
             )
 
     def _persist(self, key_id: int) -> None:
@@ -112,7 +111,6 @@ class StateStore:
                 st.cooldown_until,
                 st.dead_reason,
                 st.rpm_observed,
-                st.tpm_observed,
                 time.time(),
             ),
         )

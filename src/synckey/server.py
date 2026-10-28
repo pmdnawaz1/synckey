@@ -241,6 +241,7 @@ def create_app(ctx: Context | None = None) -> FastAPI:
                 {
                     "ts": r["ts"],
                     "type": r["type"],
+                    "key_id": r["key_id"],
                     "provider": r["provider"],
                     "model": r["model"],
                     "fallback_to": r["fallback_to"],
@@ -284,7 +285,7 @@ def create_app(ctx: Context | None = None) -> FastAPI:
         return JSONResponse(
             {
                 "id": request_id,
-                "object": "deferred",
+                "object": "chat.deferred",
                 "status": status,
                 "retry_after": retry_after,
                 "result_url": f"/v1/requests/{request_id}",
@@ -402,7 +403,7 @@ async def run_request(
     if not attempts:
         return err(
             "No available keys for this route: none configured, or all are dead. "
-            "Run `synckey key list` to check.",
+            "Run `synckey keys` to check.",
             "no_available_keys",
             503,
         )
@@ -506,7 +507,7 @@ def defer_request(
     return JSONResponse(
         {
             "id": rid,
-            "object": "deferred",
+            "object": "chat.deferred",
             "status": "queued",
             "model": resolution.bare_model,
             "retry_after": retry_after,

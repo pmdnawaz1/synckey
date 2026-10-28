@@ -1,7 +1,7 @@
 """User-managed routing preferences.
 
 These are the knobs a user sets interactively (via `synckey setup`, `config`,
-`tier`, or the `key add` flow) rather than hand-editing a file:
+`tier`, or the `synckey keys add` flow) rather than hand-editing a file:
 
     global_default_model   model used when a request names neither model nor provider
     provider_defaults      {provider: model} used when a request names only a provider

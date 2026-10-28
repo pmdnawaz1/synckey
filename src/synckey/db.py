@@ -299,11 +299,6 @@ class Database:
             "SELECT * FROM routing_chains ORDER BY ts DESC LIMIT ?", (limit,)
         ).fetchall()
 
-    def routing_chain_by_id(self, chain_id: int) -> sqlite3.Row | None:
-        return self.conn.execute(
-            "SELECT * FROM routing_chains WHERE id=?", (chain_id,)
-        ).fetchone()
-
     # usage reads
     def usage_summary(self, since: float | None = None) -> list[sqlite3.Row]:
         sql = (

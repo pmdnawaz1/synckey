@@ -149,6 +149,16 @@ BUILTIN: dict[str, Provider] = {
             signup="https://cloud.sambanova.ai/apis",
         ),
         Provider(
+            id="anthropic",
+            name="Anthropic",
+            base_url="https://api.anthropic.com/v1",
+            env=("ANTHROPIC_API_KEY",),
+            patterns=(r"^claude", r"^anthropic/"),
+            auth="x-api-key",
+            signup="https://console.anthropic.com/settings/keys",
+            notes="Uses Anthropic's OpenAI-compatible endpoint.",
+        ),
+        Provider(
             id="openai",
             name="OpenAI",
             base_url="https://api.openai.com/v1",

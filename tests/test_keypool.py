@@ -96,3 +96,14 @@ def test_on_failure_preserves_longer_cooldown(ctx):
     before = ctx.states.get(a).cooldown_until
     ctx.pool.on_failure(a)
     assert ctx.states.get(a).cooldown_until == before
+
+
+def test_on_failure_cools_live_key_briefly(ctx):
+    a = _add(ctx, "groq", "a", "key-a")
+    assert ctx.states.get(a).health == Health.LIVE
+    ctx.pool.on_failure(a)
+    st = ctx.states.get(a)
+    assert st.health == Health.COOLING
+    remaining = st.cooldown_remaining()
+    # First failure on a LIVE key: short backoff (~2s), not the full default cooldown.
+    assert 0 < remaining <= ctx.pool.default_cooldown

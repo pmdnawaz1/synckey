@@ -203,3 +203,65 @@ def test_worker_exception_requeues_job(ctx, monkeypatch):
 
     asyncio.run(_drive())
     assert ctx.db.get_deferred(rid)["status"] == "queued"
+
+
+def test_reset_running_deferred_requeues(ctx):
+    ctx.db.create_deferred(
+        id="defer_run", path="/chat/completions", body="{}", model="x",
+        provider_hint=None, floor=None, eta=time.time(),
+    )
+    ctx.db.set_deferred_running("defer_run")
+    assert ctx.db.get_deferred("defer_run")["status"] == "running"
+    n = ctx.db.reset_running_deferred()
+    assert n == 1
+    assert ctx.db.get_deferred("defer_run")["status"] == "queued"
+
+
+def test_purge_removes_stale_queued_jobs(ctx):
+    ctx.db.create_deferred(
+        id="defer_stale", path="/chat/completions", body="{}", model="x",
+        provider_hint=None, floor=None, eta=time.time(),
+    )
+    ctx.db.conn.execute(
+        "UPDATE deferred SET created_at=? WHERE id=?", (time.time() - 100000, "defer_stale")
+    )
+    ctx.db.conn.commit()
+    removed = ctx.db.purge_deferred(ttl=3600, max_queue_age=86400)
+    assert removed == 1
+    assert ctx.db.get_deferred("defer_stale") is None
+
+
+def test_purge_keeps_fresh_queued_jobs(ctx):
+    ctx.db.create_deferred(
+        id="defer_fresh", path="/chat/completions", body="{}", model="x",
+        provider_hint=None, floor=None, eta=time.time(),
+    )
+    removed = ctx.db.purge_deferred(ttl=3600, max_queue_age=86400)
+    assert removed == 0
+    assert ctx.db.get_deferred("defer_fresh") is not None
+
+
+# ---- estimate_eta -----------------------------------------------------------
+
+def test_estimate_eta_zero_when_a_key_is_ready(ctx):
+    from synckey.deferred import estimate_eta
+
+    _add(ctx, n=1)  # live key with an uncapped bucket
+    assert estimate_eta(ctx, ["groq"]) == 0.0
+
+
+def test_estimate_eta_uses_soonest_cooldown(ctx):
+    from synckey.deferred import estimate_eta
+
+    ids = _add(ctx, n=2)
+    ctx.pool.on_rate_limit(ids[0], retry_after=30)
+    ctx.pool.on_rate_limit(ids[1], retry_after=90)
+    eta = estimate_eta(ctx, ["groq"])
+    assert 25 <= eta <= 35  # min of the two cooldowns
+
+
+def test_estimate_eta_falls_back_to_default(ctx):
+    from synckey.deferred import estimate_eta
+
+    # No keys at all -> no waits reported -> default cooldown.
+    assert estimate_eta(ctx, ["groq"]) == ctx.settings.default_cooldown

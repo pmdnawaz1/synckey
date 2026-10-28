@@ -2,7 +2,7 @@ from synckey.providers import BUILTIN, match_by_pattern, split_provider_prefix
 
 
 def test_known_providers_present():
-    for pid in ("gemini", "groq", "cerebras", "nvidia", "github", "cohere"):
+    for pid in ("gemini", "groq", "cerebras", "nvidia", "github", "cohere", "anthropic"):
         assert pid in BUILTIN
 
 
@@ -24,7 +24,9 @@ def test_pattern_detection_unambiguous_names():
     assert match_by_pattern("command-r-plus", BUILTIN) == "cohere"
     assert match_by_pattern("gpt-4o", BUILTIN) == "openai"
     assert match_by_pattern("grok-2", BUILTIN) == "xai"
+    assert match_by_pattern("claude-sonnet-4-6", BUILTIN) == "anthropic"
 
 
 def test_auth_headers():
     assert BUILTIN["groq"].auth_headers("abc") == {"Authorization": "Bearer abc"}
+    assert BUILTIN["anthropic"].auth_headers("abc") == {"x-api-key": "abc"}

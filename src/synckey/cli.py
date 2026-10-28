@@ -17,11 +17,11 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .config import ensure_home, generate_unified_key, home, config_path
+from .config import ensure_home, generate_unified_key, home
 from .context import Context
 from .db import sha256
 from .state import Health
-from .tiers import TIER_BY_NAME, TIER_NAMES, model_tier, model_price
+from .tiers import TIER_BY_NAME, TIER_NAMES, model_tier
 
 app = typer.Typer(
     name="synckey",
@@ -439,9 +439,18 @@ def tier_list():
     ctx.close()
 
 
-@app.command("keys")
-def keys(
-    provider: str = typer.Argument(None),
+keys_app = typer.Typer(
+    help="Manage stored provider keys.",
+    invoke_without_command=True,
+    no_args_is_help=False,
+)
+app.add_typer(keys_app, name="keys")
+
+
+@keys_app.callback()
+def keys_main(
+    ctx_: typer.Context,
+    provider: str = typer.Option(None, "--provider", "-p", help="Only show keys for this provider."),
     rm: int = typer.Option(None, "--rm", help="Remove a key by its id."),
     enable: int = typer.Option(None, "--enable", help="Re-enable a dead or disabled key."),
     disable: int = typer.Option(None, "--disable", help="Disable a key without deleting it."),
@@ -459,6 +468,8 @@ def keys(
       synckey keys --disable 3  disable key #3
       synckey keys --limits 3 --rpm 60 --tpm 100000 --weight 2
     """
+    if ctx_.invoked_subcommand is not None:
+        return
     ctx = load_ctx()
 
     if rm is not None:
@@ -548,6 +559,42 @@ def keys(
         )
 
     console.print(table)
+    ctx.close()
+
+
+@keys_app.command("add")
+def keys_add(
+    provider: str = typer.Argument(..., help="Provider id, e.g. groq."),
+    key: str = typer.Option(None, "--key", "-k", help="API key(s); comma-separated for bulk."),
+    file: Path = typer.Option(None, "--file", "-f", help="File of keys (one per line or comma-separated, '#' comments)."),
+    from_env: bool = typer.Option(False, "--from-env", help="Read the key from the provider's env var(s)."),
+    label: str = typer.Option(None, "--label", "-l", help="Label for the key (single-key adds)."),
+    weight: int = typer.Option(1, "--weight", "-w", help="Routing weight."),
+    rpm: float = typer.Option(None, "--rpm", help="Requests-per-minute cap for each added key."),
+    tpm: float = typer.Option(None, "--tpm", help="Tokens-per-minute cap for each added key."),
+    default: str = typer.Option(None, "--default", help="Set this provider's default model (id, tier, or alias)."),
+    fetch: bool = typer.Option(None, "--fetch/--no-fetch", help="Fetch the provider's model list after adding."),
+):
+    """Add one or more keys for a provider (non-interactive).
+
+    Examples:
+      synckey keys add groq --key gsk_abc123
+      synckey keys add groq --key "gsk_a,gsk_b,gsk_c" --rpm 60
+      synckey keys add gemini --file keys.txt --default gemini-2.0-flash
+      synckey keys add openai --from-env
+    """
+    provider = provider.lower()
+    ctx = load_ctx()
+    if provider not in ctx.providers:
+        err_con.print(f"[red]Unknown provider '{provider}'.[/] Run `synckey providers` for the list.")
+        raise typer.Exit(1)
+    if weight < 1:
+        err_con.print("[red]Weight must be >= 1.[/]")
+        raise typer.Exit(1)
+    secrets = _collect_secrets(ctx, provider, key, file, from_env)
+    for s in secrets:
+        _add_one_key(ctx, provider, s, label, weight, rpm, tpm)
+    _post_add_flow(ctx, provider, fetch, default)
     ctx.close()
 
 
@@ -800,12 +847,34 @@ def routing_preset(
     ctx.close()
 
 
+def _pid_file() -> Path:
+    return home() / "gateway.pid"
+
+
+def _log_file() -> Path:
+    return home() / "gateway.log"
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        try:
+            s.connect((host, port))
+            return True
+        except OSError:
+            return False
+
+
 @app.command()
 def serve(
     host: str = typer.Option(None, "--host", "-h"),
     port: int = typer.Option(None, "--port", "-p"),
+    background: bool = typer.Option(False, "--background", "-b", help="Detach and run in the background (logs to gateway.log)."),
+    workers: int = typer.Option(1, "--workers", "-w", help="Uvicorn worker processes (foreground only; each worker keeps its own key pool)."),
 ):
-    """Run the unified OpenAI-compatible gateway (background)."""
+    """Run the unified OpenAI-compatible gateway (foreground by default)."""
     import subprocess
     import sys
     import os
@@ -819,6 +888,14 @@ def serve(
 
     bind_host = host or ctx.settings.host
     bind_port = port or ctx.settings.port
+
+    if _port_in_use(bind_host, bind_port):
+        err_con.print(
+            f"[red]Port {bind_port} is already in use.[/] "
+            "Stop it with `synckey stop` or pick another with --port."
+        )
+        ctx.close()
+        raise typer.Exit(1)
 
     live, _, dead = ctx.states.counts(k.id for k in ctx.db.list_keys())
 
@@ -840,27 +917,90 @@ def serve(
     )
     ctx.close()
 
-    code = (
-        "from synckey.server import create_app;"
-        "from synckey.context import Context;"
-        "import uvicorn;"
-        f"uvicorn.run(create_app(Context()), host={bind_host!r}, port={bind_port}, "
-        "log_level='warning', access_log=False)"
-    )
+    if background and workers > 1:
+        err_con.print("[red]--workers is only supported in foreground mode.[/]")
+        raise typer.Exit(1)
 
-    kwargs = {
-        "cwd": os.getcwd(),
-        "stdin": subprocess.DEVNULL,
-        "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
-    }
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
+    if background:
+        ensure_home()
+        code = (
+            "from synckey.server import create_app;"
+            "import uvicorn;"
+            f"uvicorn.run(create_app(), host={bind_host!r}, port={bind_port}, "
+            "log_level='warning', access_log=False)"
+        )
+        log = open(_log_file(), "ab")
+        kwargs = {"cwd": os.getcwd(), "stdin": subprocess.DEVNULL, "stdout": log, "stderr": subprocess.STDOUT}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        else:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen([sys.executable, "-c", code], **kwargs)
+        _pid_file().write_text(str(proc.pid))
+        console.print(
+            f"\n[green]Gateway running in background[/] (pid {proc.pid}).\n"
+            f"Logs: [cyan]{_log_file()}[/]\n"
+            f"Stop: [bold]synckey stop[/]"
+        )
+        return
 
-    subprocess.Popen([sys.executable, "-c", code], **kwargs)
-    console.print("\n[green]Gateway running in background.[/] Use [bold]synckey status[/] to monitor.")
+    if workers > 1:
+        console.print(
+            f"[yellow]Note:[/] {workers} workers each keep their own key pool; "
+            "per-key rate limits apply per worker."
+        )
+    import uvicorn
+    from .server import create_app
+
+    try:
+        if workers > 1:
+            uvicorn.run(
+                "synckey.server:create_app",
+                factory=True,
+                host=bind_host,
+                port=bind_port,
+                workers=workers,
+                log_level="warning",
+                access_log=False,
+            )
+        else:
+            uvicorn.run(
+                create_app(),
+                host=bind_host,
+                port=bind_port,
+                log_level="warning",
+                access_log=False,
+            )
+    except KeyboardInterrupt:
+        pass
+
+
+@app.command()
+def stop():
+    """Stop a gateway started with `synckey serve --background`."""
+    import signal
+
+    pid_file = _pid_file()
+    if not pid_file.exists():
+        err_con.print(
+            "[yellow]No PID file found.[/] "
+            "Only gateways started with `synckey serve --background` can be stopped this way."
+        )
+        raise typer.Exit(1)
+    try:
+        pid = int(pid_file.read_text().strip())
+    except ValueError:
+        pid_file.unlink(missing_ok=True)
+        err_con.print("[red]Corrupt PID file removed.[/]")
+        raise typer.Exit(1)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pid_file.unlink(missing_ok=True)
+        err_con.print(f"[yellow]Process {pid} was not running; removed stale PID file.[/]")
+        raise typer.Exit(1)
+    pid_file.unlink(missing_ok=True)
+    console.print(f"[green]Stopped[/] gateway (pid {pid}).")
 
 
 @app.command()
@@ -945,39 +1085,6 @@ def usage(
                 f"{r['avg_latency']:.0f}" if r["avg_latency"] else "",
             )
         console.print(table)
-    ctx.close()
-
-
-@app.command("spend", hidden=True)
-def spend(hours: float = typer.Option(None, "--hours")):
-    """Cost breakdown by provider and model. (Use: synckey usage --spend)"""
-    ctx = load_ctx()
-    since = time.time() - hours * 3600 if hours else None
-    totals = ctx.db.usage_totals(since)
-    summary = ctx.db.usage_summary(since)
-
-    total_cost = totals["cost_usd"] or 0.0
-    console.print(f"[bold]Total spend:[/] [green]{fmt_cost(total_cost)}[/]"
-                  + (f" (last {hours}h)" if hours else " (all time)"))
-
-    if not summary:
-        console.print("[dim]No usage data.[/]")
-        ctx.close()
-        return
-
-    table = Table(title="Spend breakdown")
-    for col in ("provider", "model", "tier", "requests", "tokens", "cost", "% total"):
-        table.add_column(col)
-    for r in summary:
-        cost = r["cost_usd"] or 0.0
-        pct = (cost / total_cost * 100) if total_cost else 0
-        tier_name = TIER_NAMES.get(r["tier"] or 0, "")
-        table.add_row(
-            r["provider"], r["model"], tier_name,
-            str(r["requests"]), fmt_num(r["total_tokens"]),
-            fmt_cost(cost), f"{pct:.1f}%",
-        )
-    console.print(table)
     ctx.close()
 
 

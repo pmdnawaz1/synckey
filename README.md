@@ -8,7 +8,7 @@
   One API key. Every AI model. Zero headaches.
 </h1>
 
-**synckey** lets your app use Gemini, Groq, OpenAI, Anthropic, Cerebras, Mistral, DeepSeek, xAI, and 40+ other providers — through a single OpenAI-compatible API key. No code changes. No rate limit nightmares. Just one endpoint.
+**synckey** lets your app use Gemini, Groq, OpenAI, Anthropic, Cerebras, Mistral, DeepSeek, xAI, and more — through a single OpenAI-compatible API key. No code changes. No rate limit nightmares. Just one endpoint.
 
 ```python
 from openai import OpenAI
@@ -48,8 +48,11 @@ pip install synckey
 # 2. Guided setup (30 seconds)
 synckey setup
 
-# 3. Start the gateway
+# 3. Start the gateway (foreground; Ctrl+C to stop)
 synckey serve
+
+# …or detached, in the background:
+synckey serve --background
 ```
 
 Your app now uses `http://localhost:8787/v1` with the unified key from setup.
@@ -70,8 +73,9 @@ client = OpenAI(
     api_key="sk-synckey-xxx"
 )
 
-# Use default model (set during setup)
+# Use the default model configured during setup
 client.chat.completions.create(
+    model="default",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 
@@ -259,24 +263,28 @@ curl http://localhost:8787/v1/requests/defer_abc123 \
   -H "Authorization: Bearer sk-synckey-xxx"
 ```
 
-**Queued response:**
-```json
-{"id": "defer_abc123", "status": "queued", "retry_after": 15}
-```
-
-**Running response:**
-```json
-{"id": "defer_abc123", "status": "running"}
-```
-
-**Done response:**
+**Queued/running response (202):**
 ```json
 {
   "id": "defer_abc123",
-  "status": "done",
-  "response": { /* full completion response */ }
+  "object": "chat.deferred",
+  "status": "queued",
+  "retry_after": 15,
+  "result_url": "/v1/requests/defer_abc123"
 }
 ```
+
+**Done response (200):** the upstream completion is returned directly — the body is
+exactly what the provider sent (a standard `chat.completion` JSON object), so your
+client parses it as if it had never been queued.
+
+**Error response (4xx/5xx):** a standard error envelope with the upstream status code:
+```json
+{"error": {"message": "...", "type": "deferred_error", "request_id": "defer_abc123"}}
+```
+
+Deferred requests always run **non-streaming**: the polled result is the complete
+JSON response, ready to use.
 
 ---
 
@@ -356,11 +364,15 @@ curl http://localhost:8787/v1/requests/defer_abc123 \
 | **Disk** | SQLite DB (~1MB per 10K requests) | Configurable TTL |
 | **Latency Overhead** | 2-5ms | Adds ~10ms at 100 concurrent |
 
-synckey is designed for **minimal footprint**. The gateway is single-threaded async by default (uvicorn with 1 worker). For higher throughput, increase workers:
+synckey is designed for **minimal footprint**. The gateway is single-process async by default (uvicorn with 1 worker), which handles hundreds of concurrent requests. For CPU-bound throughput you can add workers:
 
 ```bash
-synckey serve --workers 4   # 4 async workers
+synckey serve --workers 4   # 4 uvicorn worker processes
 ```
+
+> **Note:** each worker keeps its own in-memory key pool, so per-key rate
+> limits apply *per worker* (4 workers × 60 RPM cap ≈ 240 RPM total). Durable
+> health state (cooling/dead keys) is still shared via SQLite.
 
 ---
 
@@ -401,7 +413,7 @@ When **every** key is rate-limited, synckey queues the request instead of failin
 }
 ```
 
-Poll the result URL or wait — synckey runs it automatically when a key frees up. No code changes needed. Works with streaming too.
+Poll the result URL — synckey runs the request automatically when a key frees up and serves the stored response on your next poll.
 
 ---
 
@@ -465,16 +477,17 @@ synckey dash
 
 ## Supported Providers
 
-40+ providers supported out of the box:
+15 providers supported out of the box:
 
 | Category | Providers |
 |----------|-----------|
 | **Fast/Cheap** | Groq, Cerebras, GitHub Models, DeepSeek |
 | **Frontier** | OpenAI, Anthropic, Google Gemini, xAI |
-| **Open Source** | Ollama, LM Studio, LocalAI, Fireworks |
+| **Local** | Ollama — plus any custom OpenAI-compatible endpoint (see `[[providers]]` in config) |
 | **Aggregators** | OpenRouter, Together AI, SambaNova |
+| **Specialty** | Mistral, Cohere, NVIDIA NIM |
 
-Run `synckey providers` to see the full list.
+Run `synckey providers` to see the full list with signup links.
 
 ---
 
@@ -486,14 +499,22 @@ synckey setup                      # guided interactive setup
 synckey setup --force              # regenerate unified key
 
 # Gateway
-synckey serve                      # start (runs in background)
-synckey serve --port 9000        # custom port
+synckey serve                      # start in the foreground (Ctrl+C to stop)
+synckey serve --background         # detach; logs to ~/.synckey/gateway.log
+synckey serve --port 9000          # custom port
+synckey serve --workers 4          # multi-process (see note in Resource Usage)
+synckey stop                       # stop a --background gateway
 
 # Key management
 synckey keys                       # list all keys
+synckey keys add groq --key gsk_...            # add a key non-interactively
+synckey keys add groq --key "k1,k2,k3"         # bulk add (comma-separated)
+synckey keys add groq --file keys.txt          # bulk import from a file
+synckey keys add groq --from-env               # read from $GROQ_API_KEY
 synckey keys --rm <id>            # remove a key
 synckey keys --disable <id>       # temporarily disable
 synckey keys --enable <id>       # re-enable a disabled key
+synckey keys --limits <id> --rpm 60 --tpm 100000 --weight 2   # set caps
 
 # Testing
 synckey test                       # health check all keys
@@ -525,6 +546,12 @@ synckey deferred list               # queued requests
 
 # Key rotation
 synckey renew                       # regenerate unified key
+
+# Discovery
+synckey providers                   # list supported providers
+synckey models --refresh            # fetch models your keys can call
+synckey version                     # print version
+synckey --guide                     # interactive walkthrough
 ```
 
 ---
@@ -548,19 +575,35 @@ Config file: `~/.synckey/config.toml`
 host = "127.0.0.1"
 port = 8787
 request_timeout = 120
+max_connections = 600
+max_keepalive = 300
 
 [routing]
 priority = ["groq", "gemini"]
 tier_fallback = true
+cross_provider_fallback = true
 max_retries = 6
 default_cooldown = 20
 deep_cooling_threshold = 60
+
+[tiers]
+overrides = { "my-model" = "frontier" }     # manual tier assignments
+prices = { "my-model" = [1.0, 3.0] }        # $/M tokens: input, output
 
 [deferred]
 enabled = true
 ttl = 3600
 poll = 5
 max_queue = 1000
+max_queue_age = 86400
+
+# Custom OpenAI-compatible providers:
+# [[providers]]
+# id = "lmstudio"
+# name = "LM Studio"
+# base_url = "http://localhost:1234/v1"
+# patterns = ["^lmstudio/"]
+# auth = "bearer"
 ```
 
 ---
@@ -569,7 +612,10 @@ max_queue = 1000
 
 ### PM2 (Recommended for all platforms)
 
-PM2 keeps synckey running 24/7, auto-restarts on crash, and survives server reboots.
+`synckey serve` runs in the foreground by default — exactly what a process
+supervisor expects. PM2 keeps synckey running 24/7, auto-restarts on crash, and
+survives server reboots. (Do **not** use `--background` under PM2/systemd; that
+flag is only for running without a supervisor.)
 
 ```bash
 # Install PM2
@@ -681,6 +727,7 @@ nssm start synckey
 | Server reboot | PM2/systemd auto-starts synckey |
 | Crash (OOM, segfault) | Auto-restart after 10s delay |
 | All keys cooling | synckey returns 202 + poll URL (no crash) |
+| Manual stop (no supervisor) | `synckey stop` (kills the `--background` process) |
 
 ### Expose on Domain
 
@@ -753,9 +800,11 @@ ai.example.com {
 | Auto-failover | ✅ | ✅ | ✅ | ❌ |
 | Tier fallback | ✅ | ❌ | ❌ | ❌ |
 | Deferred queue | ✅ | ❌ | ❌ | ❌ |
-| No DB needed | ✅ | ❌ | ❌ | ✅ |
 | Local gateway | ✅ | ❌ | ❌ | ✅ |
 | Zero config | ✅ | ❌ | ❌ | ✅ |
+
+synckey keeps its state in a local SQLite database (`~/.synckey/synckey.db`) — no
+external database server required.
 
 ---
 
