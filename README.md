@@ -48,6 +48,8 @@ client.chat.completions.create(
 ```bash
 # 1. Install
 pip install synckey
+# …or globally, isolated from your system Python:
+pipx install synckey  # (install pipx first: python -m pip install pipx && pipx ensurepath)
 
 # 2. Guided setup (30 seconds)
 synckey setup

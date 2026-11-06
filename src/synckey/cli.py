@@ -118,8 +118,8 @@ def _add_one_key(ctx, provider: str, secret: str, label: str | None, weight: int
 def _read_key_file(path: Path) -> list[str]:
     """Read keys from a file: one per line and/or comma-separated, '#' comments ignored."""
     try:
-        text = Path(path).read_text()
-    except OSError as exc:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
         err_con.print(f"[red]Cannot read file:[/] {exc}")
         raise typer.Exit(1)
     out: list[str] = []
@@ -129,6 +129,13 @@ def _read_key_file(path: Path) -> list[str]:
             continue
         out.extend(s.strip() for s in line.split(",") if s.strip())
     return out
+
+
+def _is_file_path(value: str) -> bool:
+    try:
+        return Path(value).is_file()
+    except (OSError, ValueError):
+        return False
 
 
 def _collect_secrets(ctx, provider: str, key, file, from_env) -> list[str]:
@@ -153,9 +160,8 @@ def _collect_secrets(ctx, provider: str, key, file, from_env) -> list[str]:
             f"{prov.name} API key (one key, comma-separated keys, or a file path)",
             hide_input=True,
         ).strip()
-        candidate = Path(entered)
-        if entered and candidate.exists() and candidate.is_file():
-            secrets = _read_key_file(candidate)
+        if entered and "," not in entered and _is_file_path(entered):
+            secrets = _read_key_file(Path(entered))
         else:
             secrets = [s.strip() for s in entered.split(",") if s.strip()]
     if not secrets:
@@ -989,7 +995,7 @@ def stop():
         raise typer.Exit(1)
     try:
         pid = int(pid_file.read_text().strip())
-    except ValueError:
+    except (ValueError, OSError):
         pid_file.unlink(missing_ok=True)
         err_con.print("[red]Corrupt PID file removed.[/]")
         raise typer.Exit(1)
