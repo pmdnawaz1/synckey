@@ -386,7 +386,9 @@ async def run_request(
     estimated = estimate_tokens(body)
     stream = bool(body.get("stream")) and allow_stream
     if stream:
-        opts = body.get("stream_options") or {}
+        opts = body.get("stream_options")
+        if not isinstance(opts, dict):
+            opts = {}
         opts["include_usage"] = True
         body["stream_options"] = opts
 

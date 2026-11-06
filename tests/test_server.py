@@ -276,6 +276,26 @@ def test_tpm_tokens_consumed_on_success(ctx):
 
 
 @respx.mock
+def test_stream_with_non_dict_stream_options(ctx):
+    _add(ctx, n=1)
+    respx.post(GROQ_CHAT).mock(
+        return_value=httpx.Response(200, json={"choices": [], "usage": {}})
+    )
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={
+                "model": "groq/llama-3.3-70b-versatile",
+                "messages": [],
+                "stream": True,
+                "stream_options": ["include_usage"],
+            },
+        )
+    assert r.status_code == 200
+
+
+@respx.mock
 def test_embeddings_endpoint_passthrough(ctx):
     _add(ctx, provider="openai", n=1)
     route = respx.post(OPENAI_EMBEDDINGS).mock(

@@ -119,3 +119,68 @@ def test_stop_without_pid_file_fails(synckey_home):
     r = runner.invoke(app, ["stop"])
     assert r.exit_code == 1
     assert "No PID file" in r.output
+
+
+def test_collect_secrets_prompt_with_bulk_paste(ctx, monkeypatch):
+    from synckey.cli import _collect_secrets
+
+    blob = ",".join(f"gsk_test_key_{i:02d}_" + "x" * 40 for i in range(18))
+    assert len(blob) > 255
+    monkeypatch.setattr("synckey.cli.typer.prompt", lambda *a, **k: blob)
+    secrets = _collect_secrets(ctx, "groq", None, None, False)
+    assert len(secrets) == 18
+
+
+def test_collect_secrets_prompt_with_file_path(ctx, tmp_path, monkeypatch):
+    from synckey.cli import _collect_secrets
+
+    f = tmp_path / "keys.txt"
+    f.write_text("file-key-1\nfile-key-2\n")
+    monkeypatch.setattr("synckey.cli.typer.prompt", lambda *a, **k: str(f))
+    assert _collect_secrets(ctx, "groq", None, None, False) == ["file-key-1", "file-key-2"]
+
+
+def test_collect_secrets_prompt_with_missing_path_treated_as_key(ctx, monkeypatch):
+    from synckey.cli import _collect_secrets
+
+    monkeypatch.setattr("synckey.cli.typer.prompt", lambda *a, **k: "not-a-real-file-xyz")
+    assert _collect_secrets(ctx, "groq", None, None, False) == ["not-a-real-file-xyz"]
+
+
+def test_collect_secrets_prompt_with_null_byte_does_not_crash(ctx, monkeypatch):
+    from synckey.cli import _collect_secrets
+
+    monkeypatch.setattr("synckey.cli.typer.prompt", lambda *a, **k: "abc\x00def")
+    assert _collect_secrets(ctx, "groq", None, None, False) == ["abc\x00def"]
+
+
+def test_collect_secrets_prompt_survives_stat_failure(ctx, monkeypatch):
+    from synckey.cli import _collect_secrets
+
+    token = "x" * 5000
+    monkeypatch.setattr("synckey.cli.typer.prompt", lambda *a, **k: token)
+
+    def _boom(self, *a, **k):
+        raise OSError(36, "File name too long")
+
+    monkeypatch.setattr("pathlib.Path.exists", _boom)
+    monkeypatch.setattr("pathlib.Path.is_file", _boom)
+    assert _collect_secrets(ctx, "groq", None, None, False) == [token]
+
+
+def test_keys_add_with_binary_file_fails_cleanly(synckey_home, tmp_path):
+    f = tmp_path / "keys.bin"
+    f.write_bytes(b"\x00\x01\x02\xff\xfe\xfd" * 100)
+    r = runner.invoke(app, ["keys", "add", "groq", "--file", str(f)])
+    assert r.exit_code == 1
+    assert "Cannot read file" in r.output
+
+
+def test_stop_with_corrupt_pid_file(synckey_home):
+    from synckey.cli import _pid_file
+
+    _pid_file().parent.mkdir(parents=True, exist_ok=True)
+    _pid_file().write_text("not-a-pid")
+    r = runner.invoke(app, ["stop"])
+    assert r.exit_code == 1
+    assert "Corrupt PID file" in r.output

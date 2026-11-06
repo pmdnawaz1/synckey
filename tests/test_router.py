@@ -82,3 +82,13 @@ def test_tier_alternatives_span_floor_to_tier(ctx):
     models = [m for m, _ in alts]
     assert "claude-sonnet-4-6" in models
     assert "gpt-4o-mini" not in models
+
+
+async def test_refresh_index_survives_undecryptable_secret(ctx):
+    ctx.db.add_key("groq", "k", b"not-a-valid-token")
+
+    def _boom(pid):
+        raise RuntimeError("cannot decrypt")
+
+    discovered = await ctx.router.refresh_index(_boom)
+    assert discovered == {"groq": []}

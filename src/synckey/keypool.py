@@ -96,11 +96,15 @@ class KeyPool:
             remaining = max(0.0, st.cooldown_until - now) if st.health == Health.COOLING else 0.0
             is_cooling = remaining > 0
             can_send = bucket.can_send(estimated_tokens)
+            try:
+                secret = self._secret(r)
+            except RuntimeError:
+                continue
 
             cand = Candidate(
                 key_id=r.id,
                 label=r.label,
-                secret=self._secret(r),
+                secret=secret,
                 provider=provider,
                 ready=can_send and not is_cooling,
                 cooling=is_cooling,

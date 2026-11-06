@@ -139,9 +139,15 @@ class Router:
         configured = self.db.providers_with_keys()
         index: dict[str, set[str]] = {}
         discovered: dict[str, list[str]] = {}
+        secrets: dict[str, str | None] = {}
+        for pid in configured:
+            try:
+                secrets[pid] = secret_for(pid)
+            except RuntimeError:
+                secrets[pid] = None
         async with httpx.AsyncClient(timeout=30.0) as client:
             results = await asyncio.gather(
-                *(self._fetch_models(client, pid, secret_for(pid)) for pid in configured),
+                *(self._fetch_models(client, pid, secrets[pid]) for pid in configured),
                 return_exceptions=True,
             )
         for pid, result in zip(configured, results):

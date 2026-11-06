@@ -98,6 +98,15 @@ def test_on_failure_preserves_longer_cooldown(ctx):
     assert ctx.states.get(a).cooldown_until == before
 
 
+def test_candidates_skips_undecryptable_key(ctx):
+    good = _add(ctx, "groq", "good", "key-good")
+    bad = _add(ctx, "groq", "bad", "key-bad")
+    ctx.db.conn.execute("UPDATE keys SET secret=? WHERE id=?", (b"not-a-valid-token", bad))
+    ctx.db.conn.commit()
+    cands = ctx.pool.candidates("groq")
+    assert [c.key_id for c in cands] == [good]
+
+
 def test_on_failure_cools_live_key_briefly(ctx):
     a = _add(ctx, "groq", "a", "key-a")
     assert ctx.states.get(a).health == Health.LIVE
