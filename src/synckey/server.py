@@ -185,7 +185,7 @@ async def lifespan(app: FastAPI):
 def create_app(ctx: Context | None = None) -> FastAPI:
     owns_ctx = ctx is None
     ctx = ctx or Context()
-    app = FastAPI(title="synckey gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="synckey gateway", version="0.2.0", lifespan=lifespan)
     app.state.ctx = ctx
     app.state.owns_ctx = owns_ctx
 
