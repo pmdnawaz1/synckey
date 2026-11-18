@@ -65,9 +65,12 @@ jobs:
 
           new = f"{major}.{minor}.{patch}"
           path.write_text(
-              text[:match.start()]
-              + text[match.start():match.end()].replace(match.group(1), new)
-              + text[match.end():]
+              re.sub(
+                  r'(?m)^version\s*=\s*"\d+\.\d+\.\d+"',
+                  f'version = "{new}"',
+                  text,
+                  count=1,
+              )
           )
           print(new)
           PY
