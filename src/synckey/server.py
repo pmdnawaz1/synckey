@@ -214,6 +214,7 @@ def create_app(ctx: Context | None = None) -> FastAPI:
             }
             for model, providers in sorted(ctx.router.index.items())
             for pid in sorted(providers)
+            if (pid, model) not in ctx.router.unavailable
         ]
         return Response(content=orjson.dumps({"object": "list", "data": data}), media_type="application/json")
 
@@ -402,6 +403,25 @@ async def run_request(
                 attempts = alt_attempts
             # If no tier alts found, fall through to the cooling primaries (beats 503).
 
+    # Pre-flight size check: skip providers whose known per-request limit is
+    # exceeded. This avoids burning every key on a request upstream will reject.
+    size_reasons: list[str] = []
+    sized_attempts = []
+    for attempt in attempts:
+        limit = attempt.provider.max_request_tokens
+        if limit and estimated > limit:
+            suffix = f"/{attempt.provider.request_limit_note}" if attempt.provider.request_limit_note else ""
+            size_reasons.append(f"{limit} for {attempt.provider_id}{suffix}")
+            continue
+        sized_attempts.append(attempt)
+    if not sized_attempts and size_reasons:
+        return err(
+            f"request_too_large: ~{estimated} tokens, limit {size_reasons[0]}",
+            "request_too_large",
+            413,
+        )
+    attempts = sized_attempts
+
     if not attempts:
         return err(
             "No available keys for this route: none configured, or all are dead. "
@@ -415,6 +435,7 @@ async def run_request(
 
     last_err = "unknown"
     last_status = 502
+    err_state = [last_err, last_status]
     for attempt in attempts:
         url = attempt.provider.base_url.rstrip("/") + path
         headers = {
@@ -426,11 +447,15 @@ async def run_request(
         started = time.perf_counter()
 
         if stream:
-            result = await try_stream(ctx, writer, client, url, headers, params, body, attempt, resolution, started)
+            result = await try_stream(
+                ctx, writer, client, url, headers, params, body, attempt, resolution, started, err_state
+            )
+            last_err, last_status = err_state
             if result is not None:
                 return result
             continue
 
+        attempt.provider.sanitize_messages(body)
         try:
             resp = await client.post(url, json=body, headers=headers, params=params)
         except httpx.HTTPError as exc:
@@ -585,6 +610,7 @@ def classify_failure(
     resolution: Resolution,
     model: str,
     latency: int,
+    stream: bool = False,
 ) -> tuple[bool, str, int]:
     text = resp.text[:300]
     writer.record(
@@ -595,6 +621,7 @@ def classify_failure(
         latency_ms=latency,
         tier=resolution.tier,
         error=text,
+        stream=stream,
     )
 
     if resp.status_code == 429:
@@ -626,6 +653,11 @@ def classify_failure(
         ctx.pool.on_failure(attempt.key_id)
         return True, text, resp.status_code
 
+    if resp.status_code == 404:
+        # Upstream advertised the model but cannot actually serve it; keep it
+        # out of /v1/models so clients don't register a dead model.
+        ctx.router.mark_unavailable(attempt.provider_id, model)
+
     # 4xx other than 401/403/429: the request itself is wrong; don't burn more keys.
     return False, text, resp.status_code
 
@@ -641,7 +673,9 @@ async def try_stream(
     attempt: Attempt,
     resolution: Resolution,
     started: float,
+    err_state: list,
 ) -> Response | None:
+    attempt.provider.sanitize_messages(body)
     req = client.build_request("POST", url, json=body, headers=headers, params=params)
     try:
         resp = await client.send(req, stream=True)
@@ -652,7 +686,10 @@ async def try_stream(
     if resp.status_code != 200:
         latency = int((time.perf_counter() - started) * 1000)
         await resp.aread()
-        retriable, _, _ = classify_failure(ctx, writer, attempt, resp, resolution, body["model"], latency)
+        retriable, err, status = classify_failure(
+            ctx, writer, attempt, resp, resolution, body["model"], latency, stream=True
+        )
+        err_state[0], err_state[1] = err, status
         status_code = resp.status_code
         content = bytes(resp.content)
         await resp.aclose()

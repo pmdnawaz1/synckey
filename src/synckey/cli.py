@@ -717,7 +717,7 @@ def setup(force: bool = typer.Option(False, "--force", help="Regenerate the unif
 def _run_guide():
     """Interactive walkthrough of synckey concepts."""
     console.print(Panel.fit(
-        "[bold]synckey guide[/] let's walk through how it all works.\n"
+        "[bold]synckey --guide[/] let's walk through how it all works.\n"
         "Press Enter at each step, or Ctrl+C to quit anytime.",
         border_style="cyan",
     ))

@@ -52,6 +52,11 @@ def test_spend_prints_once(synckey_home):
     assert r.output.count("Spend breakdown") == 1
 
 
+def test_no_separate_spend_command(synckey_home):
+    r = runner.invoke(app, ["spend"])
+    assert r.exit_code != 0
+
+
 def test_renew_rotates_unified_key(synckey_home):
     c = Context()
     c.db.set_meta("unified_key_hash", sha256("old-key"))

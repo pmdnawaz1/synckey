@@ -120,6 +120,26 @@ def test_4xx_not_retried(ctx):
     assert route.call_count == 1
 
 
+@respx.mock
+def test_oversized_request_rejected_before_upstream(ctx):
+    _add(ctx, n=2)
+    route = respx.post(GROQ_CHAT).mock(return_value=httpx.Response(200, json={"choices": []}))
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={
+                "model": "groq/llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": "x" * 40000}],
+            },
+        )
+    assert r.status_code == 413
+    msg = r.json()["error"]["message"]
+    assert "request_too_large" in msg
+    assert "8000 for groq/on_demand" in msg
+    assert route.call_count == 0
+
+
 def test_models_endpoint(ctx):
     ctx.router._index = {"gemini-2.0-flash": {"gemini"}}
     with TestClient(create_app(ctx)) as client:
@@ -130,6 +150,30 @@ def test_models_endpoint(ctx):
     # Tier should be annotated
     entry = next(m for m in data if m["id"] == "gemini-2.0-flash")
     assert entry["synckey_tier"] == "mid"
+
+
+@respx.mock
+def test_404_model_is_removed_from_models_list(ctx):
+    _add(ctx, n=1)
+    ctx.router._index = {
+        "llama-3.3-70b-versatile": {"groq"},
+        "gpt-oss-120b": {"groq"},
+    }
+    ctx.router._rebuild_tier_index()
+    respx.post(GROQ_CHAT).mock(return_value=httpx.Response(404, json={"error": "not found"}))
+
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={"model": "groq/llama-3.3-70b-versatile", "messages": []},
+        )
+        assert r.status_code == 404
+        data = client.get("/v1/models", headers=AUTH).json()["data"]
+
+    ids = {m["id"] for m in data}
+    assert "llama-3.3-70b-versatile" not in ids
+    assert "gpt-oss-120b" in ids
 
 
 def test_quality_floor_header_parsed(ctx):
@@ -228,6 +272,24 @@ def test_stream_4xx_returns_upstream_without_retry(ctx):
     assert r.status_code == 400
     assert route.call_count == 1
     assert r.json()["error"]["message"] == "bad request"
+
+
+@respx.mock
+def test_stream_exhaustion_reports_upstream_error(ctx):
+    _add(ctx, n=2)
+    route = respx.post(GROQ_CHAT).mock(
+        return_value=httpx.Response(500, json={"error": {"message": "upstream boom"}})
+    )
+    with TestClient(create_app(ctx)) as client:
+        r = client.post(
+            "/v1/chat/completions",
+            headers=AUTH,
+            json={"model": "groq/llama-3.3-70b-versatile", "messages": [], "stream": True},
+        )
+    assert route.call_count == 2
+    assert r.status_code == 500
+    assert "upstream boom" in r.json()["error"]["message"]
+    assert "Last: unknown" not in r.json()["error"]["message"]
 
 
 def test_cross_provider_fallback_off_stays_on_first_provider(ctx):

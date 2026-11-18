@@ -81,6 +81,7 @@ class Router:
         self._known_ids = set(providers)
         self._index: dict[str, set[str]] = {}
         self._tier_index: dict[int, list[str]] = {}  # tier -> [model_ids in index]
+        self._unavailable: set[tuple[str, str]] = set()  # (provider, model) known 404s
         self._index_built_at: float = 0.0
         # User defaults/aliases are read once at startup (hot-path: no per-request
         # DB read). CLI changes apply on the next `serve`; call reload_prefs() to
@@ -135,6 +136,14 @@ class Router:
     def index_age(self) -> float:
         return time.time() - self._index_built_at if self._index_built_at else float("inf")
 
+    def mark_unavailable(self, provider: str, model: str) -> None:
+        """Remember a (provider, model) that upstream rejected as not callable."""
+        self._unavailable.add((provider, model))
+
+    @property
+    def unavailable(self) -> set[tuple[str, str]]:
+        return self._unavailable
+
     async def refresh_index(self, secret_for) -> dict[str, list[str]]:
         configured = self.db.providers_with_keys()
         index: dict[str, set[str]] = {}
@@ -157,6 +166,7 @@ class Router:
                 index.setdefault(m, set()).add(pid)
         self._index = index
         self._index_built_at = time.time()
+        self._unavailable.clear()
         self._rebuild_tier_index()
         self._save_cached_index()
         return discovered
