@@ -46,3 +46,31 @@ def test_stop_flushes_remaining(synckey_home):
     w.record(provider="groq", model="m", key_id=1, status_code=200)
     w.stop(timeout=10)
     assert _count(db_path()) == 1
+
+
+def test_classify_failure_records_stream_flag():
+    from types import SimpleNamespace
+
+    import httpx
+
+    from synckey.server import classify_failure
+
+    recorded = {}
+
+    class _Writer:
+        def record(self, **kwargs):
+            recorded.update(kwargs)
+
+    attempt = SimpleNamespace(provider_id="groq", key_id=1)
+    resolution = SimpleNamespace(tier=None)
+    resp = httpx.Response(400, text="bad request")
+
+    retriable, err, status = classify_failure(
+        None, _Writer(), attempt, resp, resolution, "m", 10, stream=True
+    )
+
+    assert retriable is False
+    assert status == 400
+    assert err == "bad request"
+    assert recorded["stream"] is True
+    assert recorded["error"] == "bad request"

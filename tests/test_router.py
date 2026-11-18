@@ -29,6 +29,12 @@ def test_resolve_unknown(ctx):
     assert res.providers == []
 
 
+def test_groq_route_carries_reasoning_strip_flag(ctx):
+    res = ctx.router.resolve("gpt-oss-120b")
+    assert res.providers == ["groq"]
+    assert ctx.router.providers["groq"].strip_assistant_reasoning is True
+
+
 def test_tier_set_for_known_models(ctx):
     res = ctx.router.resolve("claude-opus-4-8")
     assert res.tier == FRONTIER

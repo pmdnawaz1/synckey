@@ -30,3 +30,39 @@ def test_pattern_detection_unambiguous_names():
 def test_auth_headers():
     assert BUILTIN["groq"].auth_headers("abc") == {"Authorization": "Bearer abc"}
     assert BUILTIN["anthropic"].auth_headers("abc") == {"x-api-key": "abc"}
+
+
+def test_groq_strips_assistant_reasoning_only():
+    body = {
+        "messages": [
+            {"role": "user", "content": "hi", "reasoning_content": "keep me"},
+            {
+                "role": "assistant",
+                "content": "ok",
+                "reasoning_content": "drop me",
+                "reasoning": "drop me too",
+            },
+            {"role": "tool", "content": "done", "reasoning_content": "keep me"},
+        ]
+    }
+    BUILTIN["groq"].sanitize_messages(body)
+    assert "reasoning_content" in body["messages"][0]
+    assert "reasoning_content" not in body["messages"][1]
+    assert "reasoning" not in body["messages"][1]
+    assert "reasoning_content" in body["messages"][2]
+
+
+def test_providers_without_flag_keep_reasoning():
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "reasoning_content": "keep me",
+                "reasoning": "keep me",
+            }
+        ]
+    }
+    BUILTIN["openai"].sanitize_messages(body)
+    assert body["messages"][0]["reasoning_content"] == "keep me"
+    assert body["messages"][0]["reasoning"] == "keep me"

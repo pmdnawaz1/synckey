@@ -23,6 +23,9 @@ class Provider:
     auth: str = "bearer"  # "bearer" | "x-api-key" | "query:<param>"
     signup: str = ""
     notes: str = ""
+    strip_assistant_reasoning: bool = False
+    max_request_tokens: int | None = None
+    request_limit_note: str = ""
     _rx: list[Pattern[str]] = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -42,6 +45,23 @@ class Provider:
         if self.auth.startswith("query:"):
             return {self.auth.split(":", 1)[1]: secret}
         return {}
+
+    def sanitize_messages(self, body: dict) -> None:
+        """Drop reasoning fields from assistant messages when upstream rejects them.
+
+        Groq returns HTTP 400 for `reasoning_content`/`reasoning` on input, which
+        breaks clients that replay a model's reasoning on the next tool turn.
+        Providers that accept reasoning leave the request untouched.
+        """
+        if not self.strip_assistant_reasoning:
+            return
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return
+        for message in messages:
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                message.pop("reasoning_content", None)
+                message.pop("reasoning", None)
 
 
 # Patterns only claim models a provider unambiguously owns. Shared open-weight
@@ -64,6 +84,9 @@ BUILTIN: dict[str, Provider] = {
             env=("GROQ_API_KEY",),
             patterns=(r"versatile$", r"instant$", r"^whisper-large", r"^groq/", r"^gpt-oss", r"^openai/gpt-oss"),
             signup="https://console.groq.com/keys",
+            strip_assistant_reasoning=True,
+            max_request_tokens=8000,
+            request_limit_note="on_demand",
         ),
         Provider(
             id="cerebras",

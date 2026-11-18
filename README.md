@@ -3,7 +3,9 @@
 <h1 align="center">
   <img src="https://img.shields.io/github/stars/pmdnawaz1/synckey?style=flat&color=20MDFF" alt="Stars"/>
   <img src="https://img.shields.io/pypi/v/synckey?style=flat&color=20MDFF" alt="PyPI"/>
+  <img src="https://img.shields.io/pypi/pyversions/synckey?style=flat&color=20MDFF" alt="Python versions"/>
   <img src="https://img.shields.io/pypi/l/synckey?style=flat&color=20MDFF" alt="License"/>
+  <img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat" alt="PRs welcome"/>
   <br/>
   One API key. Every AI model. Zero headaches.
 </h1>
@@ -40,6 +42,18 @@ client.chat.completions.create(
 | Expensive models during peak | **Tier-based fallback** → uses cheaper models when others are throttled |
 | Switching providers mid-code | **Zero code changes** — just change the model name |
 | Key rotation nightmares | **One command** to rotate: `synckey renew` |
+
+### Features at a glance
+
+- **One OpenAI-compatible endpoint** — point any SDK at `http://localhost:8787/v1` and forget provider-specific auth.
+- **Automatic failover** — retries other keys/providers when one is rate-limited or down.
+- **Tier-aware fallback** — FRONTIER → HIGH → MID → LOW, never silently dropping quality below your floor.
+- **Deferred requests** — when every key is cooling, synckey queues the request and hands back a poll URL.
+- **Live dashboard** — `synckey dash` shows health, cooldowns, usage and cost in real time.
+- **Zero secret leakage** — only a SHA-256 hash of your unified key is stored; provider keys are sealed at rest.
+- **Bring your own provider** — any OpenAI-compatible endpoint can be added via `config.toml`.
+
+New here? Run `synckey --guide` for a short interactive walkthrough, or `synckey setup` to get running in 30 seconds.
 
 ---
 
@@ -791,6 +805,12 @@ ai.example.com {
 ### All requests returning 202 queued
 - Keys may be in cooldown: `synckey status`
 - Check events: `synckey events`
+
+### Streaming requests fail with `All N attempts failed ... Last: unknown`
+- Not a quota problem by itself: check the real error by sending the same request with `"stream": false`.
+- Common causes: request over the provider's per-request token limit (HTTP 413), or `reasoning_content` on assistant messages (HTTP 400).
+- Make sure the gateway you are running is the version you think it is: `pip show synckey`.
+- Details, measurements and fixes: [docs/opencode-and-request-limits.md](docs/opencode-and-request-limits.md)
 
 ### Model not found (404)
 - Model may not be in index: `synckey models --refresh`
