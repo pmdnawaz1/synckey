@@ -68,11 +68,11 @@ pipx install synckey  # (install pipx first: python -m pip install pipx && pipx 
 # 2. Guided setup (30 seconds)
 synckey setup
 
-# 3. Start the gateway (foreground; Ctrl+C to stop)
+# 3. Start the gateway (detaches once it is listening)
 synckey serve
 
-# …or detached, in the background:
-synckey serve --background
+# …or keep it in the foreground (Ctrl+C to stop):
+synckey serve --foreground
 ```
 
 Your app now uses `http://localhost:8787/v1` with the unified key from setup.
@@ -387,7 +387,7 @@ JSON response, ready to use.
 synckey is designed for **minimal footprint**. The gateway is single-process async by default (uvicorn with 1 worker), which handles hundreds of concurrent requests. For CPU-bound throughput you can add workers:
 
 ```bash
-synckey serve --workers 4   # 4 uvicorn worker processes
+synckey serve --foreground --workers 4   # 4 uvicorn worker processes
 ```
 
 > **Note:** each worker keeps its own in-memory key pool, so per-key rate
@@ -519,11 +519,11 @@ synckey setup                      # guided interactive setup
 synckey setup --force              # regenerate unified key
 
 # Gateway
-synckey serve                      # start in the foreground (Ctrl+C to stop)
-synckey serve --background         # detach; logs to ~/.synckey/gateway.log
+synckey serve                      # detach once listening; logs to ~/.synckey/gateway.log
+synckey serve --foreground         # keep in foreground (Ctrl+C to stop)
 synckey serve --port 9000          # custom port
-synckey serve --workers 4          # multi-process (see note in Resource Usage)
-synckey stop                       # stop a --background gateway
+synckey serve --foreground --workers 4  # multi-process (foreground only; see Resource Usage)
+synckey stop                       # stop the background gateway
 
 # Key management
 synckey keys                       # list all keys
@@ -632,10 +632,11 @@ max_queue_age = 86400
 
 ### PM2 (Recommended for all platforms)
 
-`synckey serve` runs in the foreground by default — exactly what a process
-supervisor expects. PM2 keeps synckey running 24/7, auto-restarts on crash, and
-survives server reboots. (Do **not** use `--background` under PM2/systemd; that
-flag is only for running without a supervisor.)
+Use `synckey serve --foreground` under a process supervisor — that keeps the
+process attached to PM2/systemd, which expects a long-running foreground
+command. PM2 keeps synckey running 24/7, auto-restarts on crash, and survives
+server reboots. (Do **not** use the default background mode under PM2/systemd;
+that mode is only for running without a supervisor.)
 
 ```bash
 # Install PM2
@@ -663,7 +664,7 @@ module.exports = {
   apps: [{
     name: 'synckey',
     script: 'python.exe',
-    args: '-m synckey serve',
+    args: '-m synckey serve --foreground',
     cwd: 'C:\\path\\to\\synckey',
     interpreter: 'none',
     watch: false,
@@ -711,7 +712,7 @@ Type=simple
 User=synckey
 Group=synckey
 WorkingDirectory=/opt/synckey
-ExecStart=/usr/bin/python3 -m synckey serve
+ExecStart=/usr/bin/python3 -m synckey serve --foreground
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
@@ -734,7 +735,7 @@ WantedBy=multi-user.target
 ### Windows Service (NSSM)
 
 ```bash
-nssm install synckey "C:\path\to\python.exe" "-m synckey serve"
+nssm install synckey "C:\path\to\python.exe" "-m synckey serve --foreground"
 nssm set synckey AppDirectory "C:\path\to\synckey"
 nssm set synckey Start SERVICE_AUTO_START
 nssm start synckey

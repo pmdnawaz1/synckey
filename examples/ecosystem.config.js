@@ -4,7 +4,7 @@ module.exports = {
   apps: [{
     name: 'synckey',
     script: process.platform === 'win32' ? 'python.exe' : 'python3',
-    args: '-m synckey serve',
+    args: '-m synckey serve --foreground',
     cwd: __dirname,
     interpreter: 'none',
     watch: false,

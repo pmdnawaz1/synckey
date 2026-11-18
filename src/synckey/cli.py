@@ -864,10 +864,11 @@ def _log_file() -> Path:
 def _port_in_use(host: str, port: int) -> bool:
     import socket
 
+    target = "127.0.0.1" if host in ("0.0.0.0", "") else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         try:
-            s.connect((host, port))
+            s.connect((target, port))
             return True
         except OSError:
             return False
@@ -877,13 +878,14 @@ def _port_in_use(host: str, port: int) -> bool:
 def serve(
     host: str = typer.Option(None, "--host", "-h"),
     port: int = typer.Option(None, "--port", "-p"),
-    background: bool = typer.Option(False, "--background", "-b", help="Detach and run in the background (logs to gateway.log)."),
+    background: bool = typer.Option(True, "--background/--foreground", "-b/-f", help="Detach once the gateway is listening (default); --foreground blocks until Ctrl+C."),
     workers: int = typer.Option(1, "--workers", "-w", help="Uvicorn worker processes (foreground only; each worker keeps its own key pool)."),
 ):
-    """Run the unified OpenAI-compatible gateway (foreground by default)."""
+    """Run the unified OpenAI-compatible gateway (background by default)."""
     import subprocess
     import sys
     import os
+    import time
 
     ctx = load_ctx()
     if not ctx.unified_key_hash():
@@ -942,6 +944,23 @@ def serve(
         else:
             kwargs["start_new_session"] = True
         proc = subprocess.Popen([sys.executable, "-c", code], **kwargs)
+
+        deadline = time.monotonic() + 15
+        while not _port_in_use(bind_host, bind_port):
+            if proc.poll() is not None:
+                err_con.print(
+                    "[red]Gateway exited during startup[/] — check "
+                    f"[cyan]{_log_file()}[/] for details."
+                )
+                raise typer.Exit(1)
+            if time.monotonic() >= deadline:
+                err_con.print(
+                    "[red]Gateway did not start within 15s[/] — check "
+                    f"[cyan]{_log_file()}[/] for details."
+                )
+                raise typer.Exit(1)
+            time.sleep(0.1)
+
         _pid_file().write_text(str(proc.pid))
         console.print(
             f"\n[green]Gateway running in background[/] (pid {proc.pid}).\n"
@@ -983,14 +1002,14 @@ def serve(
 
 @app.command()
 def stop():
-    """Stop a gateway started with `synckey serve --background`."""
+    """Stop a gateway started with `synckey serve` (background mode)."""
     import signal
 
     pid_file = _pid_file()
     if not pid_file.exists():
         err_con.print(
             "[yellow]No PID file found.[/] "
-            "Only gateways started with `synckey serve --background` can be stopped this way."
+            "Only gateways started with `synckey serve` in background mode can be stopped this way."
         )
         raise typer.Exit(1)
     try:

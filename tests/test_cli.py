@@ -1,3 +1,6 @@
+import subprocess
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 from synckey.cli import app
@@ -189,3 +192,30 @@ def test_stop_with_corrupt_pid_file(synckey_home):
     r = runner.invoke(app, ["stop"])
     assert r.exit_code == 1
     assert "Corrupt PID file" in r.output
+
+
+def test_serve_detaches_by_default(synckey_home, monkeypatch):
+    from synckey.context import Context
+    from synckey.db import sha256
+
+    c = Context()
+    c.db.set_meta("unified_key_hash", sha256("sk-synckey-test"))
+    c.db.add_key("groq", "k", c.box.seal("s"))
+    c.close()
+
+    class FakeProc:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+    port_checks = iter([False, True])
+    monkeypatch.setattr(
+        "synckey.cli._port_in_use", lambda host, port: next(port_checks)
+    )
+
+    r = runner.invoke(app, ["serve"])
+    assert r.exit_code == 0, r.output
+    assert "running in background" in r.output
+    assert (Path(synckey_home) / "gateway.pid").read_text().strip() == "4242"
