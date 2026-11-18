@@ -51,11 +51,14 @@ jobs:
           bump = os.environ.get("BUMP", "patch")
           path = Path("pyproject.toml")
           text = path.read_text()
-          match = re.search(r'(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"', text)
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
           if not match:
               raise SystemExit("Could not find version in pyproject.toml")
+          parts = match.group(1).split(".")
+          if len(parts) < 3 or not all(part.isdigit() for part in parts[:3]):
+              raise SystemExit(f"Invalid version in pyproject.toml: {match.group(1)}")
 
-          major, minor, patch = map(int, match.groups())
+          major, minor, patch = map(int, parts[:3])
           if bump == "major":
               major, minor, patch = major + 1, 0, 0
           elif bump == "minor":
@@ -66,7 +69,7 @@ jobs:
           new = f"{major}.{minor}.{patch}"
           path.write_text(
               re.sub(
-                  r'(?m)^version\s*=\s*"\d+\.\d+\.\d+"',
+                  r'(?m)^version\s*=\s*"[^"]+"',
                   f'version = "{new}"',
                   text,
                   count=1,
