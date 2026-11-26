@@ -210,8 +210,9 @@ response = llm.invoke("Hello!")
 | `/v1/chat/completions` | POST | Yes | Chat completions (streaming supported) |
 | `/v1/embeddings` | POST | Yes | Embeddings |
 | `/v1/completions` | POST | Yes | Legacy completions |
+| `/v1/audio/transcriptions` | POST | Yes | Speech-to-text through a transcription provider |
 | `/v1/models` | GET | Yes | List available models |
-| `/v1/usage` | GET | Yes | Token usage totals |
+| `/v1/usage` | GET | Yes | Token usage and transcription duration totals |
 | `/v1/events` | GET | Yes | Recent routing events |
 | `/v1/requests/{id}` | GET | Yes | Poll deferred request status |
 | `/healthz` | GET | No | Health check |
@@ -223,6 +224,37 @@ response = llm.invoke("Hello!")
 | `Authorization` | `Bearer sk-synckey-xxx` | **Required.** Your unified API key |
 | `X-Quality-Floor` | `frontier`, `high`, `mid`, `low` | Minimum tier to use (never drop below this) |
 | `X-Provider` | Provider ID (e.g., `groq`, `gemini`) | Hint to prefer this provider first |
+
+For speech-to-text, send a multipart request with a `file` upload and a
+`model` field. SyncKey recognizes models such as `gpt-transcribe` (OpenAI),
+`whisper-large-v3` (Groq), and `voxtral-mini-transcribe-3` (Mistral).
+Use `model=provider/model-id` or the `X-Provider` header to pin a provider.
+For an OpenRouter model with a namespaced ID, send
+`X-Provider: openrouter` with `model=openai/whisper-1`.
+
+To enable a custom multipart transcription endpoint, set
+`transcription_path = "/audio/transcriptions"` in its `[[providers]]` entry.
+Set `transcription_models = ["my-stt-model"]` to route bare model IDs
+automatically. These patterns match the entire model ID. You can also pin
+the custom provider by ID.
+
+The full multipart body may be up to 26 MiB. SyncKey forwards the file and
+form options unchanged, applying each provider's authentication and model
+ID. Key failover also applies to transcription. An unpinned request can fail
+over across providers that serve the same model when cross-provider fallback
+is enabled. Supported audio formats and form options depend on the upstream.
+
+Successful transcriptions contribute to `audio_seconds` in `/v1/usage` and
+`synckey usage` when the provider reports a duration or SyncKey can read it
+from the upload. On upstreams with verbose JSON support, you can request
+`response_format=verbose_json` to get provider-supplied duration metadata.
+
+JSON request bodies are limited to 8 MiB by default. Set
+`gateway.max_json_body_bytes` in `config.toml` to change the limit.
+When every eligible key is cooling, transcription requests and JSON
+requests with deferral disabled return HTTP 429 with `Retry-After` in
+seconds. With deferral enabled, JSON requests can still queue and return
+HTTP 202 with a polling hint.
 
 ### POST /v1/chat/completions
 
@@ -596,6 +628,7 @@ host = "127.0.0.1"
 port = 8787
 request_timeout = 120
 max_connections = 600
+max_json_body_bytes = 8388608
 max_keepalive = 300
 
 [routing]

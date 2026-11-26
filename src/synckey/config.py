@@ -43,6 +43,7 @@ class Settings:
     request_timeout: float = 120.0
     max_connections: int = 600
     max_keepalive: int = 300
+    max_json_body_bytes: int = 8 * 1024 * 1024
     # Fallback: ordered preference when several providers serve the same model.
     provider_priority: list[str] = field(default_factory=list)
     cross_provider_fallback: bool = True
@@ -66,6 +67,10 @@ class Settings:
     deferred_max_queue: int = 1000        # reject new deferrals beyond this many queued
     deferred_max_queue_age: float = 86400.0  # drop a job that never ran within this window
 
+    def __post_init__(self) -> None:
+        if type(self.max_json_body_bytes) is not int or self.max_json_body_bytes <= 0:
+            raise ValueError("gateway.max_json_body_bytes must be a positive integer.")
+
     @classmethod
     def load(cls) -> "Settings":
         path = config_path()
@@ -82,6 +87,7 @@ class Settings:
             request_timeout=gw.get("request_timeout", cls.request_timeout),
             max_connections=gw.get("max_connections", cls.max_connections),
             max_keepalive=gw.get("max_keepalive", cls.max_keepalive),
+            max_json_body_bytes=gw.get("max_json_body_bytes", cls.max_json_body_bytes),
             provider_priority=routing.get("priority", []),
             cross_provider_fallback=routing.get("cross_provider_fallback", True),
             max_retries=routing.get("max_retries", cls.max_retries),
@@ -112,6 +118,7 @@ class Settings:
         data.setdefault("gateway", {})["request_timeout"] = self.request_timeout
         data.setdefault("gateway", {})["max_connections"] = self.max_connections
         data.setdefault("gateway", {})["max_keepalive"] = self.max_keepalive
+        data.setdefault("gateway", {})["max_json_body_bytes"] = self.max_json_body_bytes
         data.setdefault("routing", {})["priority"] = self.provider_priority
         data.setdefault("routing", {})["cross_provider_fallback"] = self.cross_provider_fallback
         data.setdefault("routing", {})["max_retries"] = self.max_retries
