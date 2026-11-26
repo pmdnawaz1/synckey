@@ -12,6 +12,25 @@ def _count(path):
         conn.close()
 
 
+def test_existing_usage_rows_survive_audio_duration_migration(tmp_path):
+    from synckey.db import Database, SCHEMA
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA.replace(",\n    audio_seconds     REAL", ""))
+    conn.execute("INSERT INTO usage(ts, provider, model, total_tokens) VALUES (1, 'groq', 'm', 12)")
+    conn.commit()
+    conn.close()
+
+    for _ in range(2):
+        db = Database(path)
+        try:
+            assert db.recent_usage()[0]["audio_seconds"] is None
+            assert db.usage_totals()["total_tokens"] == 12
+        finally:
+            db.close()
+
+
 def test_records_flushed_to_db(synckey_home):
     from synckey.config import db_path
 

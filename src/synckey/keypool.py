@@ -11,8 +11,11 @@ This means the gateway stops sending to a key *before* it 429s, not after.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 
 from .bucket import Bucket, BucketRegistry
 from .crypto import SecretBox
@@ -36,9 +39,16 @@ def parse_retry_after(value: str | None) -> float | None:
     if not value:
         return None
     try:
-        return float(value)
+        delay = float(value)
     except ValueError:
-        return None
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            delay = max(0.0, deadline.timestamp() - time.time())
+        except (ValueError, OverflowError, OSError):
+            return None
+    return delay if math.isfinite(delay) and delay >= 0 else None
 
 
 class KeyPool:

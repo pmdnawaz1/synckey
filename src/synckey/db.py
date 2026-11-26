@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS usage (
     latency_ms        INTEGER NOT NULL DEFAULT 0,
     stream            INTEGER NOT NULL DEFAULT 0,
     tier              INTEGER,
-    error             TEXT
+    error             TEXT,
+    audio_seconds     REAL
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -93,9 +94,9 @@ CREATE TABLE IF NOT EXISTS routing_chains (
 
 USAGE_COLS = (
     "ts, provider, model, key_id, prompt_tokens, completion_tokens, "
-    "total_tokens, cost_usd, status_code, latency_ms, stream, tier, error"
+    "total_tokens, cost_usd, status_code, latency_ms, stream, tier, error, audio_seconds"
 )
-USAGE_INSERT = f"INSERT INTO usage({USAGE_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+USAGE_INSERT = f"INSERT INTO usage({USAGE_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 
 
 def tune(conn: sqlite3.Connection) -> None:
@@ -131,7 +132,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         tune(self.conn)
         self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            columns = self.conn.execute("PRAGMA table_info(usage)").fetchall()
+            if not any(column["name"] == "audio_seconds" for column in columns):
+                self.conn.execute("ALTER TABLE usage ADD COLUMN audio_seconds REAL")
 
     def close(self) -> None:
         self.conn.close()
@@ -305,6 +310,7 @@ class Database:
             "SELECT provider, model, tier, COUNT(*) requests, "
             "SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens, "
             "SUM(total_tokens) total_tokens, SUM(cost_usd) cost_usd, "
+            "SUM(audio_seconds) audio_seconds, "
             "SUM(CASE WHEN status_code>=400 OR error IS NOT NULL THEN 1 ELSE 0 END) errors, "
             "AVG(latency_ms) avg_latency FROM usage"
         )
@@ -319,7 +325,7 @@ class Database:
         sql = (
             "SELECT COUNT(*) requests, SUM(total_tokens) total_tokens, "
             "SUM(prompt_tokens) prompt_tokens, SUM(completion_tokens) completion_tokens, "
-            "SUM(cost_usd) cost_usd, "
+            "SUM(cost_usd) cost_usd, SUM(audio_seconds) audio_seconds, "
             "SUM(CASE WHEN status_code>=400 OR error IS NOT NULL THEN 1 ELSE 0 END) errors "
             "FROM usage"
         )

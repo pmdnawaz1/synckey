@@ -51,17 +51,16 @@ def test_all_locally_throttled_defers(ctx):
     assert ctx.db.count_deferred("queued") == 1
 
 
-@respx.mock
 def test_deferred_disabled_does_not_queue(ctx):
-    # With deferral off, an all-cooling request is NOT queued; the cooling key is
-    # tried as a last resort (here the upstream is still rate-limiting).
-    ids = _add(ctx, n=1)
-    _cool_all(ctx, ids)
+    first, second = _add(ctx, n=2)
+    ctx.pool.on_rate_limit(first, retry_after=120)
+    ctx.pool.on_rate_limit(second, retry_after=15)
     ctx.settings.deferred_enabled = False
-    respx.post(GROQ_CHAT).mock(return_value=httpx.Response(429, json={"error": "slow down"}))
+    ctx.settings.max_retries = 0
     with TestClient(create_app(ctx)) as client:
         r = client.post("/v1/chat/completions", headers=AUTH, json={"model": MODEL, "messages": []})
-    assert r.status_code != 202
+    assert r.status_code == 429
+    assert 1 <= int(r.headers["Retry-After"]) <= 15
     assert ctx.db.count_deferred() == 0
 
 

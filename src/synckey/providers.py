@@ -26,13 +26,20 @@ class Provider:
     strip_assistant_reasoning: bool = False
     max_request_tokens: int | None = None
     request_limit_note: str = ""
+    transcription_path: str | None = None
+    transcription_models: tuple[str, ...] = ()
     _rx: list[Pattern[str]] = field(default_factory=list, init=False, repr=False, compare=False)
+    _transcription_rx: list[Pattern[str]] = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self._rx = [re.compile(p, re.IGNORECASE) for p in self.patterns]
+        self._transcription_rx = [re.compile(p, re.IGNORECASE) for p in self.transcription_models]
 
     def matches(self, model: str) -> bool:
         return any(rx.search(model) for rx in self._rx)
+
+    def matches_transcription(self, model: str) -> bool:
+        return bool(self.transcription_path) and any(rx.fullmatch(model) for rx in self._transcription_rx)
 
     def auth_headers(self, secret: str) -> dict[str, str]:
         if self.auth == "bearer":
@@ -87,6 +94,8 @@ BUILTIN: dict[str, Provider] = {
             strip_assistant_reasoning=True,
             max_request_tokens=8000,
             request_limit_note="on_demand",
+            transcription_path="/audio/transcriptions",
+            transcription_models=(r"whisper-large-v3(?:-turbo)?",),
         ),
         Provider(
             id="cerebras",
@@ -130,6 +139,7 @@ BUILTIN: dict[str, Provider] = {
             env=("OPENROUTER_API_KEY",),
             patterns=(r"^openrouter/",),
             signup="https://openrouter.ai/keys",
+            transcription_path="/audio/transcriptions",
         ),
         Provider(
             id="together",
@@ -146,6 +156,8 @@ BUILTIN: dict[str, Provider] = {
             env=("MISTRAL_API_KEY",),
             patterns=(r"^mistral", r"^codestral", r"^ministral", r"^pixtral", r"^magistral"),
             signup="https://console.mistral.ai/api-keys",
+            transcription_path="/audio/transcriptions",
+            transcription_models=(r"voxtral-(?:mini|small)-(?:latest|\d{4}|transcribe-(?!realtime)[\w-]+)",),
         ),
         Provider(
             id="deepseek",
@@ -188,6 +200,8 @@ BUILTIN: dict[str, Provider] = {
             env=("OPENAI_API_KEY",),
             patterns=(r"^gpt-", r"^o[0-9]", r"^chatgpt", r"^dall-e", r"^text-embedding-3"),
             signup="https://platform.openai.com/api-keys",
+            transcription_path="/audio/transcriptions",
+            transcription_models=(r"whisper-1", r"gpt(?:-4o(?:-mini)?)?-transcribe(?:-[\w-]+)?"),
         ),
         Provider(
             id="ollama",

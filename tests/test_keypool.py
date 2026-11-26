@@ -1,12 +1,27 @@
 import time
+from email.utils import formatdate
 
 import pytest
 
+from synckey.keypool import parse_retry_after
 from synckey.state import Health
 
 
 def _add(ctx, provider, label, secret, weight=1):
     return ctx.db.add_key(provider, label, ctx.box.seal(secret), weight=weight)
+
+
+@pytest.mark.parametrize("value", ["NaN", "inf", "-inf", "-1", "invalid"])
+def test_retry_after_rejects_invalid_delays(value):
+    assert parse_retry_after(value) is None
+
+
+def test_retry_after_accepts_seconds_and_http_dates(monkeypatch):
+    now = 1_700_000_000
+    monkeypatch.setattr("synckey.keypool.time.time", lambda: now)
+    assert parse_retry_after("1.5") == 1.5
+    assert parse_retry_after(formatdate(now + 30, usegmt=True)) == 30
+    assert parse_retry_after(formatdate(now - 30, usegmt=True)) == 0
 
 
 def test_round_robin_rotates(ctx):

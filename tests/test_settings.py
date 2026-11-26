@@ -6,6 +6,7 @@ def test_save_load_roundtrip(synckey_home):
     s.provider_priority = ["groq", "gemini"]
     s.cross_provider_fallback = False
     s.max_retries = 3
+    s.max_json_body_bytes = 1024
     s.tier_overrides = {"my-model.v2": "frontier"}
     s.price_overrides = {"my-model.v2": [1.0, 2.0]}
     s.custom_providers = [
@@ -25,6 +26,7 @@ def test_save_load_roundtrip(synckey_home):
     assert s2.provider_priority == ["groq", "gemini"]
     assert s2.cross_provider_fallback is False
     assert s2.max_retries == 3
+    assert s2.max_json_body_bytes == 1024
     assert s2.tier_overrides == {"my-model.v2": "frontier"}
     assert s2.price_overrides == {"my-model.v2": [1.0, 2.0]}
     assert s2.custom_providers[0]["id"] == "acme"

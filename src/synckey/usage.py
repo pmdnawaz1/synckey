@@ -45,6 +45,7 @@ class UsageWriter:
         stream: bool = False,
         tier: int | None = None,
         error: str | None = None,
+        audio_seconds: float | None = None,
     ) -> None:
         row = (
             time.time(),
@@ -60,6 +61,7 @@ class UsageWriter:
             1 if stream else 0,
             tier,
             error,
+            audio_seconds,
         )
         try:
             self.queue.put_nowait(row)

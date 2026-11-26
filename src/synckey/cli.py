@@ -1034,7 +1034,7 @@ def usage(
     recent: bool = typer.Option(False, "--recent"),
     spend: bool = typer.Option(False, "--spend", help="Show cost breakdown by provider and model."),
 ):
-    """Token usage and request monitoring.
+    """Token usage, transcription duration, and request monitoring.
 
     Use --spend for cost breakdown, --recent for last 25 requests.
     """
@@ -1069,7 +1069,7 @@ def usage(
 
     if recent:
         table = Table(title="Recent requests")
-        for col in ("when", "provider", "model", "tier", "tokens", "cost", "status", "ms"):
+        for col in ("when", "provider", "model", "tier", "tokens", "audio s", "cost", "status", "ms"):
             table.add_column(col)
         for r in ctx.db.recent_usage(25):
             ago = int(time.time() - r["ts"])
@@ -1078,7 +1078,9 @@ def usage(
             tier_name = TIER_NAMES.get(r["tier"] or 0, "")
             table.add_row(
                 f"{ago}s ago", r["provider"], r["model"], tier_name,
-                fmt_num(r["total_tokens"]), fmt_cost(r["cost_usd"]),
+                fmt_num(r["total_tokens"]),
+                f"{r['audio_seconds']:.2f}" if r["audio_seconds"] is not None else "",
+                fmt_cost(r["cost_usd"]),
                 f"[{color}]{status}[/]", str(r["latency_ms"]),
             )
         console.print(table)
@@ -1090,6 +1092,7 @@ def usage(
             f"requests:  [bold]{totals['requests'] or 0}[/]  ([red]{totals['errors'] or 0} errors[/])\n"
             f"tokens:    [bold cyan]{fmt_num(totals['total_tokens'])}[/] total "
             f"({fmt_num(totals['prompt_tokens'])} prompt + {fmt_num(totals['completion_tokens'])} completion)\n"
+            f"audio:     [bold cyan]{totals['audio_seconds'] or 0.0:.2f}[/] seconds\n"
             f"cost:      [bold green]{fmt_cost(totals['cost_usd'])}[/]",
             title=f"Usage{' (last {}h)'.format(hours) if hours else ' (all time)'}",
             border_style="cyan",
@@ -1098,13 +1101,14 @@ def usage(
     summary = ctx.db.usage_summary(since)
     if summary:
         table = Table(title="By model")
-        for col in ("provider", "model", "tier", "reqs", "tokens", "cost", "errors", "avg ms"):
+        for col in ("provider", "model", "tier", "reqs", "tokens", "audio s", "cost", "errors", "avg ms"):
             table.add_column(col)
         for r in summary:
             tier_name = TIER_NAMES.get(r["tier"] or 0, "")
             table.add_row(
                 r["provider"], r["model"], tier_name,
                 str(r["requests"]), fmt_num(r["total_tokens"]),
+                f"{r['audio_seconds']:.2f}" if r["audio_seconds"] is not None else "",
                 fmt_cost(r["cost_usd"]),
                 str(r["errors"] or 0),
                 f"{r['avg_latency']:.0f}" if r["avg_latency"] else "",

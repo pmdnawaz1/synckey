@@ -19,6 +19,7 @@ def merged_providers(settings: Settings) -> dict[str, Provider]:
     providers = dict(BUILTIN)
     for spec in settings.custom_providers:
         try:
+            previous = providers.get(spec["id"])
             prov = Provider(
                 id=spec["id"],
                 name=spec.get("name", spec["id"]),
@@ -29,6 +30,8 @@ def merged_providers(settings: Settings) -> dict[str, Provider]:
                 auth=spec.get("auth", "bearer"),
                 signup=spec.get("signup", ""),
                 notes=spec.get("notes", ""),
+                transcription_path=spec.get("transcription_path", previous.transcription_path if previous else None),
+                transcription_models=tuple(spec.get("transcription_models", previous.transcription_models if previous else ())),
             )
             providers[prov.id] = prov
         except KeyError:

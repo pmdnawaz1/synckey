@@ -19,22 +19,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import AsyncIterator
+from itertools import islice
+from typing import AsyncIterator, Iterator
 
 import httpx
 import orjson
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .audio import transcriptions
 from .context import Context
 from .db import sha256
 from .deferred import estimate_eta, new_request_id
 from .keypool import parse_retry_after, Candidate
 from .providers import Provider
+from .request_body import BodyTooLarge, InvalidBody, read_body
 from .router import Resolution
+from .state import Health
 from .tiers import TIER_BY_NAME, cost_usd, model_tier
 from .usage import UsageWriter
 
@@ -56,7 +61,7 @@ def estimate_tokens(body: dict) -> int:
 
 
 def plan_attempts(
-    ctx: Context, resolution: Resolution, max_retries: int, estimated_tokens: int = 0
+    ctx: Context, resolution: Resolution, max_retries: int | None, estimated_tokens: int = 0
 ) -> list[Attempt]:
     providers = resolution.providers
     if not ctx.settings.cross_provider_fallback:
@@ -70,7 +75,20 @@ def plan_attempts(
             attempts.append(Attempt(pid, prov, cand.key_id, cand.secret, cand))
     # ready (bucket has space) before throttled before cooling
     attempts.sort(key=lambda a: (a.candidate.cooling, not a.candidate.ready))
-    return attempts[: max_retries + 1]
+    return attempts if max_retries is None else attempts[: max_retries + 1]
+
+
+def cooling_retry_after(ctx: Context, attempts: list[Attempt]) -> int | None:
+    states = [ctx.states.get(attempt.key_id) for attempt in attempts]
+    delays = [state.cooldown_remaining() for state in states if state.health != Health.DEAD]
+    earliest = min(delays, default=0.0)
+    return math.ceil(earliest) if 0 < earliest < math.inf else None
+
+
+def available_attempts(ctx: Context, attempts: list[Attempt]) -> Iterator[Attempt]:
+    # Recheck between upstream calls, since another request may cool or disable a key.
+    available = (attempt for attempt in attempts if ctx.states.get(attempt.key_id).is_available())
+    return islice(available, max(0, ctx.settings.max_retries + 1))
 
 
 def all_deep_cooling(attempts: list[Attempt], threshold: float) -> bool:
@@ -146,8 +164,15 @@ def unauthorized() -> JSONResponse:
     )
 
 
-def err(message: str, etype: str, status: int, **extra) -> JSONResponse:
-    return JSONResponse({"error": {"message": message, "type": etype, **extra}}, status_code=status)
+def err(message: str, etype: str, status: int, *, retry_after: int | None = None, **extra) -> JSONResponse:
+    headers = {"Retry-After": str(retry_after)} if retry_after is not None else None
+    return JSONResponse(
+        {"error": {"message": message, "type": etype, **extra}}, status_code=status, headers=headers
+    )
+
+
+def cooling_error(retry_after: int) -> JSONResponse:
+    return err("All eligible keys are cooling down.", "rate_limit_error", 429, retry_after=retry_after)
 
 
 @asynccontextmanager
@@ -228,6 +253,7 @@ def create_app(ctx: Context | None = None) -> FastAPI:
             "total_tokens": totals["total_tokens"] or 0,
             "prompt_tokens": totals["prompt_tokens"] or 0,
             "completion_tokens": totals["completion_tokens"] or 0,
+            "audio_seconds": round(totals["audio_seconds"] or 0.0, 6),
             "cost_usd": round(totals["cost_usd"] or 0.0, 6),
             "errors": totals["errors"] or 0,
         }
@@ -307,6 +333,10 @@ def create_app(ctx: Context | None = None) -> FastAPI:
     async def completions(request: Request):
         return await forward(ctx, request, "/completions")
 
+    @app.post("/v1/audio/transcriptions")
+    async def audio_transcriptions(request: Request):
+        return await transcriptions(ctx, request)
+
     return app
 
 
@@ -317,14 +347,21 @@ async def forward(
         return unauthorized()
 
     try:
-        body = await request.json()
-    except Exception:
+        raw_body = await read_body(request, ctx.settings.max_json_body_bytes)
+        body = orjson.loads(raw_body)
+    except BodyTooLarge as exc:
+        return err(str(exc), "request_too_large", 413)
+    except InvalidBody as exc:
+        return err(str(exc), "invalid_request_error", 400)
+    except orjson.JSONDecodeError:
         return err("Body must be valid JSON.", "invalid_request_error", 400)
     if not isinstance(body, dict):
         return err("Body must be a JSON object.", "invalid_request_error", 400)
 
     # synckey-specific routing hints; strip from the body before forwarding upstream.
     provider_hint = body.pop("provider", None) or request.headers.get("x-provider")
+    if provider_hint is not None and not isinstance(provider_hint, str):
+        return err("'provider' must be a string.", "invalid_request_error", 400)
     model = body.get("model")
 
     # Parse optional quality floor from caller.
@@ -393,7 +430,7 @@ async def run_request(
         opts["include_usage"] = True
         body["stream_options"] = opts
 
-    attempts = plan_attempts(ctx, resolution, ctx.settings.max_retries, estimated)
+    attempts = plan_attempts(ctx, resolution, None, estimated)
 
     if ctx.settings.tier_fallback_enabled:
         threshold = ctx.settings.deep_cooling_threshold
@@ -401,7 +438,6 @@ async def run_request(
             alt_attempts = build_tier_alt_attempts(ctx, resolution, body, estimated)
             if alt_attempts:
                 attempts = alt_attempts
-            # If no tier alts found, fall through to the cooling primaries (beats 503).
 
     # Pre-flight size check: skip providers whose known per-request limit is
     # exceeded. This avoids burning every key on a request upstream will reject.
@@ -433,10 +469,15 @@ async def run_request(
         # No key is ready: all are cooling (429'd) and/or locally bucket-throttled.
         return None  # caller defers rather than firing into a likely 429
 
+    retry_after = cooling_retry_after(ctx, attempts)
+    if retry_after is not None:
+        return cooling_error(retry_after)
+
     last_err = "unknown"
     last_status = 502
     err_state = [last_err, last_status]
-    for attempt in attempts:
+    count = 0
+    for count, attempt in enumerate(available_attempts(ctx, attempts), start=1):
         url = attempt.provider.base_url.rstrip("/") + path
         headers = {
             "Content-Type": "application/json",
@@ -490,9 +531,10 @@ async def run_request(
             return Response(content=resp.content, media_type="application/json", status_code=resp.status_code)
 
     return err(
-        f"All {len(attempts)} attempts failed for '{resolution.bare_model}'. Last: {last_err}",
+        f"All {count} attempts failed for '{resolution.bare_model}'. Last: {last_err}",
         "upstream_exhausted",
         last_status if last_status >= 400 else 502,
+        retry_after=cooling_retry_after(ctx, attempts),
         providers_tried=resolution.providers,
     )
 
@@ -507,15 +549,20 @@ def defer_request(
     resolution: Resolution,
 ) -> JSONResponse:
     """Persist a request whose keys are all cooling and return a 202 + poll info."""
+    providers = (
+        resolution.providers if ctx.settings.cross_provider_fallback else resolution.providers[:1]
+    )
+    eta_seconds = estimate_eta(ctx, providers)
+    retry_after = max(1, math.ceil(eta_seconds))
     if ctx.db.count_deferred("queued") >= ctx.settings.deferred_max_queue:
         return err(
-            "Deferred queue is full; try again shortly.", "queue_full", 503
+            "Deferred queue is full; try again shortly.", "queue_full", 503,
+            retry_after=retry_after,
         )
 
     body.pop("stream", None)
     body.pop("stream_options", None)
     rid = new_request_id()
-    eta_seconds = estimate_eta(ctx, resolution.providers)
     ctx.db.create_deferred(
         id=rid,
         path=path,
@@ -525,7 +572,6 @@ def defer_request(
         floor=floor,
         eta=time.time() + eta_seconds,
     )
-    retry_after = int(eta_seconds) + 1
     ctx.db.record_event(
         type="deferred",
         model=resolution.bare_model,
@@ -611,8 +657,11 @@ def classify_failure(
     model: str,
     latency: int,
     stream: bool = False,
+    *,
+    error_message: str | None = None,
+    mark_model_unavailable: bool = True,
 ) -> tuple[bool, str, int]:
-    text = resp.text[:300]
+    text = resp.text[:300] if error_message is None else error_message
     writer.record(
         provider=attempt.provider_id,
         model=model,
@@ -653,7 +702,7 @@ def classify_failure(
         ctx.pool.on_failure(attempt.key_id)
         return True, text, resp.status_code
 
-    if resp.status_code == 404:
+    if resp.status_code == 404 and mark_model_unavailable:
         # Upstream advertised the model but cannot actually serve it; keep it
         # out of /v1/models so clients don't register a dead model.
         ctx.router.mark_unavailable(attempt.provider_id, model)

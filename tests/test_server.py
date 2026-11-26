@@ -1,4 +1,5 @@
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -257,6 +258,33 @@ def test_non_object_body_returns_400(ctx):
     assert r.json()["error"]["type"] == "invalid_request_error"
 
 
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"])
+async def test_json_body_limit_for_declared_and_chunked_uploads(ctx, path):
+    ctx.settings.max_json_body_bytes = 8
+    transport = httpx.ASGITransport(app=create_app(ctx))
+
+    async def chunks_with_limit():
+        yield b"12345"
+        yield b"67890"
+        pytest.fail("JSON upload continued beyond the limit")
+
+    async def unread_body():
+        pytest.fail("JSON upload with a large Content-Length was read")
+        yield b""
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        declared = await client.post(
+            path, headers={**AUTH, "Content-Length": "9"}, content=unread_body(),
+        )
+        streamed = await client.post(path, headers=AUTH, content=chunks_with_limit())
+        exact = await client.post(path, headers=AUTH, content=b"{}      ")
+    for response in (declared, streamed):
+        assert response.status_code == 413
+        assert response.json()["error"]["type"] == "request_too_large"
+    assert exact.status_code == 400
+    assert "No 'model' given" in exact.json()["error"]["message"]
+
+
 @respx.mock
 def test_stream_4xx_returns_upstream_without_retry(ctx):
     _add(ctx, n=2)
@@ -424,12 +452,14 @@ def test_events_endpoint_reports_rate_limits(ctx):
         return_value=httpx.Response(429, headers={"retry-after": "10"}, json={"error": "slow"})
     )
     with TestClient(create_app(ctx)) as client:
-        client.post(
+        first = client.post(
             "/v1/chat/completions",
             headers=AUTH,
             json={"model": "groq/llama-3.3-70b-versatile", "messages": []},
         )
         r = client.get("/v1/events", headers=AUTH)
+    assert first.status_code == 429
+    assert 1 <= int(first.headers["Retry-After"]) <= 10
     assert r.status_code == 200
     events = r.json()["events"]
     assert any(e["type"] == "rate_limited" and e["key_id"] == ids[0] for e in events)
